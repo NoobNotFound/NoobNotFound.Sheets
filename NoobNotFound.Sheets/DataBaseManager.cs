@@ -18,6 +18,7 @@ namespace NoobNotFound.Sheets;
         private readonly SheetsService _service;
         private readonly string _spreadsheetId;
         private readonly string _sheetName;
+        private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
 
         /// <summary>
         /// Initializes a new instance of the DataBaseManager class.
@@ -44,6 +45,10 @@ namespace NoobNotFound.Sheets;
         /// <returns>A boolean indicating whether the operation was successful.</returns>
         public async Task<bool> AddAsync(T item)
         {
+            try
+            {
+            await _semaphore.WaitAsync();
+                
             var values = new List<IList<object>> { ConvertToRow(item) };
             var range = $"{_sheetName}!A:Z";
 
@@ -53,6 +58,11 @@ namespace NoobNotFound.Sheets;
 
             var response = await request.ExecuteAsync();
             return response.Updates.UpdatedRows > 0;
+            }  
+            finally
+            {
+                _semaphore.Release();
+            }
         }
 
         /// <summary>
@@ -62,6 +72,10 @@ namespace NoobNotFound.Sheets;
         /// <returns>A boolean indicating whether any items were removed.</returns>
         public async Task<bool> RemoveAsync(Func<T, bool> predicate)
         {
+            try
+            {
+            await _semaphore.WaitAsync();
+
             var allData = await GetAllAsync();
             var itemsToRemove = allData.Where(predicate).ToList();
 
@@ -87,6 +101,11 @@ namespace NoobNotFound.Sheets;
             }
 
             return true;
+            }
+              finally
+            {
+                _semaphore.Release();
+            }
         }
 
         /// <summary>
@@ -121,6 +140,10 @@ namespace NoobNotFound.Sheets;
         /// <returns>A boolean indicating whether any items were updated.</returns>
         public async Task<bool> UpdateAsync(Func<T, bool> predicate, T updatedItem)
         {
+            try
+            {
+            await _semaphore.WaitAsync();
+
             var rows = await GetAllRowsAsync();
             var updatedRows = new List<IList<object>>();
             bool updated = false;
@@ -149,6 +172,11 @@ namespace NoobNotFound.Sheets;
 
             var response = await updateRequest.ExecuteAsync();
             return response.UpdatedRows > 0;
+            }
+              finally
+            {
+                _semaphore.Release();
+            }
         }
 
         /// <summary>
@@ -252,7 +280,7 @@ private T ConvertToItem(IList<object> row)
         /// Deletes a specific row from the sheet.
         /// </summary>
         /// <param name="rowIndex">The index of the row to be deleted.</param>
-        private async Task DeleteRowAsync(int rowIndex)
+        private async Task DeleteRowAsync(int rowIndex,int SheetId = 0)
         {
             var requestBody = new Request
             {
