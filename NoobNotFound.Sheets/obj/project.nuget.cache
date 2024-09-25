@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "dgSpecHash": "AOKSaO0/3Sw=",
+  "success": true,
+  "projectFilePath": "/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets.csproj",
+  "expectedPackageFiles": [
+    "/Users/chanirurajapakse/.nuget/packages/google.apis/1.68.0/google.apis.1.68.0.nupkg.sha512",
+    "/Users/chanirurajapakse/.nuget/packages/google.apis.auth/1.68.0/google.apis.auth.1.68.0.nupkg.sha512",
+    "/Users/chanirurajapakse/.nuget/packages/google.apis.core/1.68.0/google.apis.core.1.68.0.nupkg.sha512",
+    "/Users/chanirurajapakse/.nuget/packages/google.apis.sheets.v4/1.68.0.3525/google.apis.sheets.v4.1.68.0.3525.nupkg.sha512",
+    "/Users/chanirurajapakse/.nuget/packages/newtonsoft.json/13.0.3/newtonsoft.json.13.0.3.nupkg.sha512",
+    "/Users/chanirurajapakse/.nuget/packages/system.codedom/7.0.0/system.codedom.7.0.0.nupkg.sha512",
+    "/Users/chanirurajapakse/.nuget/packages/system.management/7.0.2/system.management.7.0.2.nupkg.sha512"
+  ],
+  "logs": []
+}

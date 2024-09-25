@@ -1,0 +1,5 @@
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.csproj.AssemblyReference.cache
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.GeneratedMSBuildEditorConfig.editorconfig
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.AssemblyInfoInputs.cache
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.AssemblyInfo.cs
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.csproj.CoreCompileInputs.cache
