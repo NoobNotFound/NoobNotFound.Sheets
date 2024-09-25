@@ -77,14 +77,7 @@ jobs:
     - name: Setup MSBuild.exe
       uses: microsoft/setup-msbuild@v2
 
-
-    # Restore the application to populate the obj folder with RuntimeIdentifiers
-    - name: Restore the application
-      run: msbuild $env:Solution_Name /t:Restore /p:Configuration=$env:Configuration
-      env:
-        Configuration: ${{ matrix.configuration }}
-
-    # Execute all unit tests in the solution
+    # Execute all builc in the solution
     - name: Execute build
       run: dotnet build $env:Project_Name $env:Solution_Name
 
