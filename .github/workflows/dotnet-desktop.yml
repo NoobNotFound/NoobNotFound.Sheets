@@ -79,7 +79,7 @@ jobs:
 
     # Execute all builc in the solution
     - name: Execute build
-      run: dotnet build $env:Project_Name $env:Solution_Name
+      run: dotnet build
 
     # Upload the MSIX package: https://github.com/marketplace/actions/upload-a-build-artifact
     - name: Upload build artifacts
