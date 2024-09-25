@@ -8,8 +8,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 
-namespace Osanda.Medical.ApiService
-{
+namespace NoobNotFound.Sheets;
     /// <summary>
     /// Manages database operations on Google Sheets for a specific model type.
     /// </summary>
@@ -221,4 +220,3 @@ namespace Osanda.Medical.ApiService
             await request.ExecuteAsync();
         }
     }
-}
