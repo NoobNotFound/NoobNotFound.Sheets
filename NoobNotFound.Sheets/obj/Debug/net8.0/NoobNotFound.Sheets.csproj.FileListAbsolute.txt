@@ -3,3 +3,11 @@
 /Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.AssemblyInfoInputs.cache
 /Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.AssemblyInfo.cs
 /Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.csproj.CoreCompileInputs.cache
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/bin/Debug/net8.0/NoobNotFound.Sheets.deps.json
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/bin/Debug/net8.0/NoobNotFound.Sheets.dll
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/bin/Debug/net8.0/NoobNotFound.Sheets.pdb
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.sourcelink.json
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.dll
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/refint/NoobNotFound.Sheets.dll
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.pdb
+/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/ref/NoobNotFound.Sheets.dll

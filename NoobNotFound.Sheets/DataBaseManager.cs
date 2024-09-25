@@ -157,27 +157,84 @@ namespace NoobNotFound.Sheets;
         /// <param name="item">The item to be converted.</param>
         /// <returns>An IList of objects representing the item's properties.</returns>
         private IList<object> ConvertToRow(T item)
+{
+    var row = new List<object>();
+    var properties = typeof(T).GetProperties();
+
+    // Track the columns that are already used
+    var usedIndices = new HashSet<int>();
+
+    // Get the maximum column index based on attributes
+    int maxIndex = properties
+        .Where(p => p.GetCustomAttributes(typeof(SheetColumnAttribute), false).Length > 0)
+        .Max(p => ((SheetColumnAttribute)p.GetCustomAttributes(typeof(SheetColumnAttribute), false).First()).Index);
+
+    // Initialize row with null values up to the maxIndex
+    for (int i = 0; i <= maxIndex; i++)
+    {
+        row.Add(null);
+    }
+
+    // Set values in their respective column positions
+    foreach (var prop in properties)
+    {
+        var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
+        if (attribute != null)
         {
-            return typeof(T).GetProperties().Select(p => p.GetValue(item)).Cast<object>().ToList();
+            if (usedIndices.Contains(attribute.Index))
+            {
+                throw new InvalidOperationException($"Duplicate SheetColumn attribute value {attribute.Index} detected for property {prop.Name}");
+            }
+
+            var value = prop.GetValue(item);
+            row[attribute.Index] = value;
+            usedIndices.Add(attribute.Index);
         }
+    }
+
+    return row;
+}
+
 
         /// <summary>
         /// Converts a row from the sheet to an object of type T.
         /// </summary>
         /// <param name="row">The row data from the sheet.</param>
         /// <returns>An object of type T populated with the row data.</returns>
-        private T ConvertToItem(IList<object> row)
-        {
-            var item = new T();
-            var properties = typeof(T).GetProperties();
+private T ConvertToItem(IList<object> row)
+{
+    var item = new T();
+    var properties = typeof(T).GetProperties();
 
-            for (int i = 0; i < Math.Min(properties.Length, row.Count); i++)
+    // Track the columns that are already used
+    var usedIndices = new HashSet<int>();
+
+    foreach (var prop in properties)
+    {
+        var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
+        if (attribute != null)
+        {
+            if (usedIndices.Contains(attribute.Index))
             {
-                properties[i].SetValue(item, Convert.ChangeType(row[i], properties[i].PropertyType));
+                throw new InvalidOperationException($"Duplicate SheetColumn attribute value {attribute.Index} detected for property {prop.Name}");
             }
 
-            return item;
+            if (attribute.Index < row.Count)
+            {
+                var cellValue = row[attribute.Index];
+                if (cellValue != null)
+                {
+                    prop.SetValue(item, Convert.ChangeType(cellValue, prop.PropertyType));
+                }
+            }
+
+            usedIndices.Add(attribute.Index);
         }
+    }
+
+    return item;
+}
+
 
         /// <summary>
         /// Retrieves all rows from the sheet.
