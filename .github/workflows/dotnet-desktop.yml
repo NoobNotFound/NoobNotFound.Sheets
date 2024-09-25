@@ -56,7 +56,8 @@ jobs:
                              # https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idruns-on
 
     env:
-      Solution_Name: NoobNotFound                         # Replace with your solution name, i.e. MyWpfApp.sln.
+      Solution_Name: NoobNotFound    
+      Project_Name: NoobNotFound.Sheets
       Project_Path: NoobNotFound.Sheets\NoobNotFound.Sheets.csproj             # Replace with the path to your test project, i.e. MyWpfApp.Tests\MyWpfApp.Tests.csproj.
       Project_Directory: NoobNotFound.Sheets   # Replace with the Wap project directory relative to the solution, i.e. MyWpfApp.Package.
 
@@ -85,7 +86,7 @@ jobs:
 
     # Execute all unit tests in the solution
     - name: Execute build
-      run: dotnet build
+      run: dotnet build $env:Project_Name $env:Solution_Name
 
     # Upload the MSIX package: https://github.com/marketplace/actions/upload-a-build-artifact
     - name: Upload build artifacts
