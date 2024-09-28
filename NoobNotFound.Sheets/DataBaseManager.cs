@@ -9,46 +9,47 @@ using System.Linq;
 using System.Threading.Tasks;
 
 namespace NoobNotFound.Sheets;
+
+/// <summary>
+/// Manages database operations on Google Sheets for a specific model type.
+/// </summary>
+/// <typeparam name="T">The model type to be managed in the database.</typeparam>
+public class DataBaseManager<T> where T : class, new()
+{
+    private readonly SheetsService _service;
+    private readonly string _spreadsheetId;
+    private readonly string _sheetName;
+    private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
+
     /// <summary>
-    /// Manages database operations on Google Sheets for a specific model type.
+    /// Initializes a new instance of the DataBaseManager class.
     /// </summary>
-    /// <typeparam name="T">The model type to be managed in the database.</typeparam>
-    public class DataBaseManager<T> where T : class, new()
+    /// <param name="credentials">The Google API credentials</param>
+    /// <param name="spreadsheetId">The ID of the Google Sheets spreadsheet to use as the database.</param>
+    /// <param name="sheetName">The name of the specific sheet within the spreadsheet to use.</param>
+    /// <param name="appName">The name of the your app (optional).</param>
+    public DataBaseManager(GoogleCredential credentials, string spreadsheetId, string sheetName, string appName = "NoobNotFound.SheetsService")
     {
-        private readonly SheetsService _service;
-        private readonly string _spreadsheetId;
-        private readonly string _sheetName;
-        private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
-
-        /// <summary>
-        /// Initializes a new instance of the DataBaseManager class.
-        /// </summary>
-        /// <param name="credentials">The Google API credentials</param>
-        /// <param name="spreadsheetId">The ID of the Google Sheets spreadsheet to use as the database.</param>
-        /// <param name="sheetName">The name of the specific sheet within the spreadsheet to use.</param>
-        /// <param name="appName">The name of the your app (optional).</param>
-        public DataBaseManager(GoogleCredential credentials, string spreadsheetId, string sheetName, string appName = "NoobNotFound.SheetsService")
+        _spreadsheetId = spreadsheetId;
+        _sheetName = sheetName;
+        _service = new SheetsService(new BaseClientService.Initializer()
         {
-            _spreadsheetId = spreadsheetId;
-            _sheetName = sheetName;
-            _service = new SheetsService(new BaseClientService.Initializer()
-            {
-                HttpClientInitializer = credentials,
-                ApplicationName = appName
-            });
-        }
+            HttpClientInitializer = credentials,
+            ApplicationName = appName
+        });
+    }
 
-        /// <summary>
-        /// Adds a new item to the sheet.
-        /// </summary>
-        /// <param name="item">The item to be added to the database.</param>
-        /// <returns>A boolean indicating whether the operation was successful.</returns>
-        public async Task<bool> AddAsync(T item)
+    /// <summary>
+    /// Adds a new item to the sheet.
+    /// </summary>
+    /// <param name="item">The item to be added to the database.</param>
+    /// <returns>A boolean indicating whether the operation was successful.</returns>
+    public async Task<bool> AddAsync(T item)
+    {
+        try
         {
-            try
-            {
             await _semaphore.WaitAsync();
-                
+
             var values = new List<IList<object>> { ConvertToRow(item) };
             var range = $"{_sheetName}!A:Z";
 
@@ -58,22 +59,22 @@ namespace NoobNotFound.Sheets;
 
             var response = await request.ExecuteAsync();
             return response.Updates.UpdatedRows > 0;
-            }  
-            finally
-            {
-                _semaphore.Release();
-            }
         }
-
-        /// <summary>
-        /// Removes items from the sheet based on a predicate.
-        /// </summary>
-        /// <param name="predicate">A function to test each item for a condition.</param>
-        /// <returns>A boolean indicating whether any items were removed.</returns>
-        public async Task<bool> RemoveAsync(Func<T, bool> predicate)
+        finally
         {
-            try
-            {
+            _semaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// Removes items from the sheet based on a predicate.
+    /// </summary>
+    /// <param name="predicate">A function to test each item for a condition.</param>
+    /// <returns>A boolean indicating whether any items were removed.</returns>
+    public async Task<bool> RemoveAsync(Func<T, bool> predicate)
+    {
+        try
+        {
             await _semaphore.WaitAsync();
 
             var allData = await GetAllAsync();
@@ -101,47 +102,47 @@ namespace NoobNotFound.Sheets;
             }
 
             return true;
-            }
-              finally
-            {
-                _semaphore.Release();
-            }
         }
-
-        /// <summary>
-        /// Searches for items in the sheet based on a predicate.
-        /// </summary>
-        /// <param name="predicate">A function to test each item for a condition.</param>
-        /// <returns>An IEnumerable of items that satisfy the condition.</returns>
-        public async Task<IEnumerable<T>> SearchAsync(Func<T, bool> predicate)
+        finally
         {
-            var allData = await GetAllAsync();
-            return allData.Where(predicate);
+            _semaphore.Release();
         }
+    }
 
-        /// <summary>
-        /// Retrieves all items from the sheet.
-        /// </summary>
-        /// <returns>An IEnumerable of all items in the sheet.</returns>
-        public async Task<IEnumerable<T>> GetAllAsync()
+    /// <summary>
+    /// Searches for items in the sheet based on a predicate.
+    /// </summary>
+    /// <param name="predicate">A function to test each item for a condition.</param>
+    /// <returns>An IEnumerable of items that satisfy the condition.</returns>
+    public async Task<IEnumerable<T>> SearchAsync(Func<T, bool> predicate)
+    {
+        var allData = await GetAllAsync();
+        return allData.Where(predicate);
+    }
+
+    /// <summary>
+    /// Retrieves all items from the sheet.
+    /// </summary>
+    /// <returns>An IEnumerable of all items in the sheet.</returns>
+    public async Task<IEnumerable<T>> GetAllAsync()
+    {
+        var range = $"{_sheetName}!A:Z";
+        var request = _service.Spreadsheets.Values.Get(_spreadsheetId, range);
+        var response = await request.ExecuteAsync();
+
+        return response.Values.Select(ConvertToItem);
+    }
+
+    /// <summary>
+    /// Updates existing items in the sheet based on a predicate.
+    /// </summary>
+    /// <param name="predicate">A function to test each item for a condition.</param>
+    /// <param name="updatedItem">The updated item to replace the existing ones.</param>
+    /// <returns>A boolean indicating whether any items were updated.</returns>
+    public async Task<bool> UpdateAsync(Func<T, bool> predicate, T updatedItem)
+    {
+        try
         {
-            var range = $"{_sheetName}!A:Z";
-            var request = _service.Spreadsheets.Values.Get(_spreadsheetId, range);
-            var response = await request.ExecuteAsync();
-
-            return response.Values.Select(ConvertToItem);
-        }
-
-        /// <summary>
-        /// Updates existing items in the sheet based on a predicate.
-        /// </summary>
-        /// <param name="predicate">A function to test each item for a condition.</param>
-        /// <param name="updatedItem">The updated item to replace the existing ones.</param>
-        /// <returns>A boolean indicating whether any items were updated.</returns>
-        public async Task<bool> UpdateAsync(Func<T, bool> predicate, T updatedItem)
-        {
-            try
-            {
             await _semaphore.WaitAsync();
 
             var rows = await GetAllRowsAsync();
@@ -172,136 +173,136 @@ namespace NoobNotFound.Sheets;
 
             var response = await updateRequest.ExecuteAsync();
             return response.UpdatedRows > 0;
-            }
-              finally
-            {
-                _semaphore.Release();
-            }
         }
-
-        /// <summary>
-        /// Converts an object to a row representation for the sheet.
-        /// </summary>
-        /// <param name="item">The item to be converted.</param>
-        /// <returns>An IList of objects representing the item's properties.</returns>
-        private IList<object> ConvertToRow(T item)
-{
-    var row = new List<object>();
-    var properties = typeof(T).GetProperties();
-
-    // Track the columns that are already used
-    var usedIndices = new HashSet<int>();
-
-    // Get the maximum column index based on attributes
-    int maxIndex = properties
-        .Where(p => p.GetCustomAttributes(typeof(SheetColumnAttribute), false).Length > 0)
-        .Max(p => ((SheetColumnAttribute)p.GetCustomAttributes(typeof(SheetColumnAttribute), false).First()).Index);
-
-    // Initialize row with null values up to the maxIndex
-    for (int i = 0; i <= maxIndex; i++)
-    {
-        row.Add(null);
-    }
-
-    // Set values in their respective column positions
-    foreach (var prop in properties)
-    {
-        var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
-        if (attribute != null)
+        finally
         {
-            if (usedIndices.Contains(attribute.Index))
-            {
-                throw new InvalidOperationException($"Duplicate SheetColumn attribute value {attribute.Index} detected for property {prop.Name}");
-            }
-
-            var value = prop.GetValue(item);
-            row[attribute.Index] = value;
-            usedIndices.Add(attribute.Index);
+            _semaphore.Release();
         }
     }
 
-    return row;
-}
-
-
-        /// <summary>
-        /// Converts a row from the sheet to an object of type T.
-        /// </summary>
-        /// <param name="row">The row data from the sheet.</param>
-        /// <returns>An object of type T populated with the row data.</returns>
-private T ConvertToItem(IList<object> row)
-{
-    var item = new T();
-    var properties = typeof(T).GetProperties();
-
-    // Track the columns that are already used
-    var usedIndices = new HashSet<int>();
-
-    foreach (var prop in properties)
+    /// <summary>
+    /// Converts an object to a row representation for the sheet.
+    /// </summary>
+    /// <param name="item">The item to be converted.</param>
+    /// <returns>An IList of objects representing the item's properties.</returns>
+    private IList<object> ConvertToRow(T item)
     {
-        var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
-        if (attribute != null)
-        {
-            if (usedIndices.Contains(attribute.Index))
-            {
-                throw new InvalidOperationException($"Duplicate SheetColumn attribute value {attribute.Index} detected for property {prop.Name}");
-            }
+        var row = new List<object>();
+        var properties = typeof(T).GetProperties();
 
-            if (attribute.Index < row.Count)
+        // Track the columns that are already used
+        var usedIndices = new HashSet<int>();
+
+        // Get the maximum column index based on attributes
+        int maxIndex = properties
+            .Where(p => p.GetCustomAttributes(typeof(SheetColumnAttribute), false).Length > 0)
+            .Max(p => ((SheetColumnAttribute)p.GetCustomAttributes(typeof(SheetColumnAttribute), false).First()).Index);
+
+        // Initialize row with null values up to the maxIndex
+        for (int i = 0; i <= maxIndex; i++)
+        {
+            row.Add(null);
+        }
+
+        // Set values in their respective column positions
+        foreach (var prop in properties)
+        {
+            var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
+            if (attribute != null)
             {
-                var cellValue = row[attribute.Index];
-                if (cellValue != null)
+                if (usedIndices.Contains(attribute.Index))
                 {
-                    prop.SetValue(item, Convert.ChangeType(cellValue, prop.PropertyType));
+                    throw new InvalidOperationException($"Duplicate SheetColumn attribute value {attribute.Index} detected for property {prop.Name}");
                 }
-            }
 
-            usedIndices.Add(attribute.Index);
+                var value = prop.GetValue(item);
+                row[attribute.Index] = value;
+                usedIndices.Add(attribute.Index);
+            }
         }
+
+        return row;
     }
 
-    return item;
-}
 
+    /// <summary>
+    /// Converts a row from the sheet to an object of type T.
+    /// </summary>
+    /// <param name="row">The row data from the sheet.</param>
+    /// <returns>An object of type T populated with the row data.</returns>
+    private T ConvertToItem(IList<object> row)
+    {
+        var item = new T();
+        var properties = typeof(T).GetProperties();
 
-        /// <summary>
-        /// Retrieves all rows from the sheet.
-        /// </summary>
-        /// <returns>An IList of IList of objects representing all rows in the sheet.</returns>
-        private async Task<IList<IList<object>>> GetAllRowsAsync()
+        // Track the columns that are already used
+        var usedIndices = new HashSet<int>();
+
+        foreach (var prop in properties)
         {
-            var range = $"{_sheetName}!A:Z";
-            var request = _service.Spreadsheets.Values.Get(_spreadsheetId, range);
-            var response = await request.ExecuteAsync();
-            return response.Values;
-        }
-
-        /// <summary>
-        /// Deletes a specific row from the sheet.
-        /// </summary>
-        /// <param name="rowIndex">The index of the row to be deleted.</param>
-        private async Task DeleteRowAsync(int rowIndex,int SheetId = 0)
-        {
-            var requestBody = new Request
+            var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
+            if (attribute != null)
             {
-                DeleteDimension = new DeleteDimensionRequest
+                if (usedIndices.Contains(attribute.Index))
                 {
-                    Range = new DimensionRange
+                    throw new InvalidOperationException($"Duplicate SheetColumn attribute value {attribute.Index} detected for property {prop.Name}");
+                }
+
+                if (attribute.Index < row.Count)
+                {
+                    var cellValue = row[attribute.Index];
+                    if (cellValue != null)
                     {
-                        SheetId = 0, // Assuming it's the first sheet, modify if needed
-                        Dimension = "ROWS",
-                        StartIndex = rowIndex - 1,
-                        EndIndex = rowIndex
+                        prop.SetValue(item, Convert.ChangeType(cellValue, prop.PropertyType));
                     }
                 }
-            };
 
-            var deleteRequest = new BatchUpdateSpreadsheetRequest
-            {
-                Requests = new List<Request> { requestBody }
-            };
-
-            var request = _service.Spreadsheets.BatchUpdate(deleteRequest, _spreadsheetId);
-            await request.ExecuteAsync();
+                usedIndices.Add(attribute.Index);
+            }
         }
+
+        return item;
     }
+
+
+    /// <summary>
+    /// Retrieves all rows from the sheet.
+    /// </summary>
+    /// <returns>An IList of IList of objects representing all rows in the sheet.</returns>
+    private async Task<IList<IList<object>>> GetAllRowsAsync()
+    {
+        var range = $"{_sheetName}!A:Z";
+        var request = _service.Spreadsheets.Values.Get(_spreadsheetId, range);
+        var response = await request.ExecuteAsync();
+        return response.Values;
+    }
+
+    /// <summary>
+    /// Deletes a specific row from the sheet.
+    /// </summary>
+    /// <param name="rowIndex">The index of the row to be deleted.</param>
+    private async Task DeleteRowAsync(int rowIndex, int SheetId = 0)
+    {
+        var requestBody = new Request
+        {
+            DeleteDimension = new DeleteDimensionRequest
+            {
+                Range = new DimensionRange
+                {
+                    SheetId = 0, // Assuming it's the first sheet, modify if needed
+                    Dimension = "ROWS",
+                    StartIndex = rowIndex - 1,
+                    EndIndex = rowIndex
+                }
+            }
+        };
+
+        var deleteRequest = new BatchUpdateSpreadsheetRequest
+        {
+            Requests = new List<Request> { requestBody }
+        };
+
+        var request = _service.Spreadsheets.BatchUpdate(deleteRequest, _spreadsheetId);
+        await request.ExecuteAsync();
+    }
+}

@@ -11,3 +11,16 @@
 /Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/refint/NoobNotFound.Sheets.dll
 /Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/NoobNotFound.Sheets.pdb
 /Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/Debug/net8.0/ref/NoobNotFound.Sheets.dll
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\bin\Debug\net8.0\NoobNotFound.Sheets.deps.json
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\bin\Debug\net8.0\NoobNotFound.Sheets.dll
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\bin\Debug\net8.0\NoobNotFound.Sheets.pdb
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\obj\Debug\net8.0\NoobNotFound.Sheets.csproj.AssemblyReference.cache
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\obj\Debug\net8.0\NoobNotFound.Sheets.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\obj\Debug\net8.0\NoobNotFound.Sheets.AssemblyInfoInputs.cache
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\obj\Debug\net8.0\NoobNotFound.Sheets.AssemblyInfo.cs
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\obj\Debug\net8.0\NoobNotFound.Sheets.csproj.CoreCompileInputs.cache
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\obj\Debug\net8.0\NoobNotFound.Sheets.sourcelink.json
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\obj\Debug\net8.0\NoobNotFound.Sheets.dll
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\obj\Debug\net8.0\refint\NoobNotFound.Sheets.dll
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\obj\Debug\net8.0\NoobNotFound.Sheets.pdb
+C:\Users\NoobNotFound\Source\Repos\NoobNotFound.Sheets\NoobNotFound.Sheets\obj\Debug\net8.0\ref\NoobNotFound.Sheets.dll
