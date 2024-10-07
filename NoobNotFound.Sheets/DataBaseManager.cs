@@ -20,6 +20,7 @@ public class DataBaseManager<T> where T : class, new()
     private readonly string _spreadsheetId;
     private readonly string _sheetName;
     private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
+    private int _sheetId;
 
     /// <summary>
     /// Initializes a new instance of the DataBaseManager class.
@@ -37,6 +38,22 @@ public class DataBaseManager<T> where T : class, new()
             HttpClientInitializer = credentials,
             ApplicationName = appName
         });
+
+        // Initialize the SheetId
+        InitializeSheetIdAsync().GetAwaiter().GetResult();
+    }
+
+    private async Task InitializeSheetIdAsync()
+    {
+        var spreadsheet = await _service.Spreadsheets.Get(_spreadsheetId).ExecuteAsync();
+        var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == _sheetName);
+
+        if (sheet == null)
+        {
+            throw new Exception($"Sheet '{_sheetName}' not found in the spreadsheet.");
+        }
+
+        _sheetId = sheet.Properties.SheetId.Value;
     }
 
     /// <summary>
@@ -77,29 +94,23 @@ public class DataBaseManager<T> where T : class, new()
         {
             await _semaphore.WaitAsync();
 
-            var allData = await GetAllAsync();
-            var itemsToRemove = allData.Where(predicate).ToList();
-
-            if (!itemsToRemove.Any())
-                return false;
-
             var rows = await GetAllRowsAsync();
             var indicesToRemove = new List<int>();
 
             for (int i = 0; i < rows.Count; i++)
             {
                 var item = ConvertToItem(rows[i]);
-                if (itemsToRemove.Any(x => x.Equals(item)))
+                if (predicate(item))
                 {
-                    indicesToRemove.Add(i + 1); // +1 because sheet rows are 1-indexed
+                    indicesToRemove.Add(i);
                 }
             }
 
-            // Remove rows in reverse order to avoid shifting issues
-            for (int i = indicesToRemove.Count - 1; i >= 0; i--)
-            {
-                await DeleteRowAsync(indicesToRemove[i]);
-            }
+            if (!indicesToRemove.Any())
+                return false;
+
+            // Perform batch delete
+            await BatchDeleteRowsAsync(indicesToRemove);
 
             return true;
         }
@@ -107,6 +118,42 @@ public class DataBaseManager<T> where T : class, new()
         {
             _semaphore.Release();
         }
+    }
+
+    /// <summary>
+    /// Deletes a specific row from the sheet.
+    /// </summary>
+    /// <param name="rowIndices">The index of the row to be deleted.</param>
+    private async Task BatchDeleteRowsAsync(List<int> rowIndices)
+    {
+        var requests = new List<Request>();
+
+        // Sort indices in descending order to avoid shifting issues
+        rowIndices.Sort((a, b) => b.CompareTo(a));
+
+        foreach (var index in rowIndices)
+        {
+            requests.Add(new Request
+            {
+                DeleteDimension = new DeleteDimensionRequest
+                {
+                    Range = new DimensionRange
+                    {
+                        SheetId = _sheetId, // Assuming it's the first sheet, modify if needed
+                        Dimension = "ROWS",
+                        StartIndex = index,
+                        EndIndex = index + 1
+                    }
+                }
+            });
+        }
+
+        var batchUpdateRequest = new BatchUpdateSpreadsheetRequest
+        {
+            Requests = requests
+        };
+
+        await _service.Spreadsheets.BatchUpdate(batchUpdateRequest, _spreadsheetId).ExecuteAsync();
     }
 
     /// <summary>
@@ -275,34 +322,5 @@ public class DataBaseManager<T> where T : class, new()
         var request = _service.Spreadsheets.Values.Get(_spreadsheetId, range);
         var response = await request.ExecuteAsync();
         return response.Values;
-    }
-
-    /// <summary>
-    /// Deletes a specific row from the sheet.
-    /// </summary>
-    /// <param name="rowIndex">The index of the row to be deleted.</param>
-    private async Task DeleteRowAsync(int rowIndex, int SheetId = 0)
-    {
-        var requestBody = new Request
-        {
-            DeleteDimension = new DeleteDimensionRequest
-            {
-                Range = new DimensionRange
-                {
-                    SheetId = 0, // Assuming it's the first sheet, modify if needed
-                    Dimension = "ROWS",
-                    StartIndex = rowIndex - 1,
-                    EndIndex = rowIndex
-                }
-            }
-        };
-
-        var deleteRequest = new BatchUpdateSpreadsheetRequest
-        {
-            Requests = new List<Request> { requestBody }
-        };
-
-        var request = _service.Spreadsheets.BatchUpdate(deleteRequest, _spreadsheetId);
-        await request.ExecuteAsync();
     }
 }

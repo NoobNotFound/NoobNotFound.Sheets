@@ -5,6 +5,21 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Platforms>AnyCPU;ARM64;x64</Platforms>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Remove="yourapi.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="yourapi.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NoobNotFound.Sheets\NoobNotFound.Sheets.csproj" />
+  </ItemGroup>
 
 </Project>

@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Google.Apis.Auth.OAuth2;
+using Google.Apis.Sheets.v4;
 using NoobNotFound.Sheets;
 
 // Sample data model
@@ -31,36 +32,43 @@ class Program
 
     static async Task Main(string[] args)
     {
-        await InitializeDatabaseManager();
+        InitializeDatabaseManager();
 
         while (true)
         {
             DisplayMenu();
             string choice = Console.ReadLine();
 
-            switch (choice)
+            try
             {
-                case "1":
-                    await AddPerson();
-                    break;
-                case "2":
-                    await RemovePerson();
-                    break;
-                case "3":
-                    await SearchPerson();
-                    break;
-                case "4":
-                    await GetAllPeople();
-                    break;
-                case "5":
-                    await UpdatePerson();
-                    break;
-                case "6":
-                    Console.WriteLine("Exiting the application...");
-                    return;
-                default:
-                    Console.WriteLine("Invalid choice. Please try again.");
-                    break;
+                switch (choice)
+                {
+                    case "1":
+                        await AddPerson();
+                        break;
+                    case "2":
+                        await RemovePerson();
+                        break;
+                    case "3":
+                        await SearchPerson();
+                        break;
+                    case "4":
+                        await GetAllPeople();
+                        break;
+                    case "5":
+                        await UpdatePerson();
+                        break;
+                    case "6":
+                        Console.WriteLine("Exiting the application...");
+                        return;
+                    default:
+                        Console.WriteLine("Invalid choice. Please try again.");
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"An error occurred: {ex.Message}");
             }
 
             Console.WriteLine("\nPress any key to continue...");
@@ -69,20 +77,15 @@ class Program
         }
     }
 
-    static async Task InitializeDatabaseManager()
+    static void InitializeDatabaseManager()
     {
         Console.WriteLine("Initializing Database Manager...");
-        
-        // TODO: Replace with your actual credentials file path
-        string credentialsPath = "path/to/your/credentials.json";
-        var credential = GoogleCredential.FromFile(credentialsPath)
-            .CreateScoped(new[] { SheetsService.Scope.Spreadsheets });
 
         // TODO: Replace with your actual spreadsheet ID and sheet name
-        string spreadsheetId = "your-spreadsheet-id";
-        string sheetName = "your-sheet-name";
-
-        _dbManager = new DataBaseManager<Person>(credential, spreadsheetId, sheetName);
+        string spreadsheetId = "1y6i38PqQiyUeuzDhk2I6Wh3njfdr-d75qF1JMzq68es";
+        string sheetName = "TestDB";
+        
+        _dbManager = new DataBaseManager<Person>(GoogleCredential.FromFile("yourapi.json").CreateScoped([SheetsService.Scope.Spreadsheets]), spreadsheetId, sheetName);
         Console.WriteLine("Database Manager initialized successfully.");
     }
 
@@ -128,7 +131,7 @@ class Program
         string searchTerm = PromptForInput("Enter a name to search for: ");
 
         var results = await _dbManager.SearchAsync(p => p.Name.Contains(searchTerm, StringComparison.OrdinalIgnoreCase));
-        
+
         foreach (var person in results)
         {
             Console.WriteLine(person);
@@ -139,7 +142,7 @@ class Program
     {
         Console.WriteLine("\nGetting all people:");
         var allPeople = await _dbManager.GetAllAsync();
-        
+
         foreach (var person in allPeople)
         {
             Console.WriteLine(person);
