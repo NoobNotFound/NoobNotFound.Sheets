@@ -312,11 +312,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets.csproj",
+      "projectUniqueName": "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets.csproj",
       "projectName": "NoobNotFound.Sheets",
-      "projectPath": "/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets.csproj",
+      "projectPath": "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets.csproj",
       "packagesPath": "/Users/chanirurajapakse/.nuget/packages/",
-      "outputPath": "/Users/chanirurajapakse/RiderProjects/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/",
+      "outputPath": "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "/Users/chanirurajapakse/.nuget/NuGet/NuGet.Config"

@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets.csproj": {}
+    "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/TestConsole/TestConsole.csproj": {}
   },
   "projects": {
-    "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets.csproj": {
+    "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/TestConsole/TestConsole.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets.csproj",
-        "projectName": "NoobNotFound.Sheets",
-        "projectPath": "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets.csproj",
+        "projectUniqueName": "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/TestConsole/TestConsole.csproj",
+        "projectName": "TestConsole",
+        "projectPath": "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/TestConsole/TestConsole.csproj",
         "packagesPath": "/Users/chanirurajapakse/.nuget/packages/",
-        "outputPath": "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/NoobNotFound.Sheets/obj/",
+        "outputPath": "/Users/chanirurajapakse/Documents/MacOS_Projects/dotNET/Sheets/NoobNotFound.Sheets/TestConsole/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "/Users/chanirurajapakse/.nuget/NuGet/NuGet.Config"
@@ -43,16 +43,6 @@
       "frameworks": {
         "net8.0": {
           "targetAlias": "net8.0",
-          "dependencies": {
-            "Google.Apis": {
-              "target": "Package",
-              "version": "[1.68.0, )"
-            },
-            "Google.Apis.Sheets.v4": {
-              "target": "Package",
-              "version": "[1.68.0.3525, )"
-            }
-          },
           "imports": [
             "net461",
             "net462",
