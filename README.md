@@ -6,10 +6,11 @@ NoobNotFound.Sheets is a .NET library that provides a simple and efficient way t
 
 - Generic implementation for flexibility with any data model
 - Column mapping via attributes for more control over Google Sheets columns
-- Conflict detection for duplicate column mappings
+- Header support
+- Uses `SemaphoreSlim` to avoid conflicts.
 - Asynchronous methods for improved performance
 - CRUD operations: Add, Remove, Search, Update, and Get All
-- Easy setup with Google Sheets API
+- Easy setup with Google Sheets API Credidental
 - Support for multiple model types in a single Google Sheets document
 
 ## Installation
