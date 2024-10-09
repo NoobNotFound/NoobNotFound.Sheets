@@ -185,7 +185,6 @@ var allProducts = await productManager.GetAllAsync();
 
 ## Limitations
 
-- The first row of your Google Sheet should contain headers matching the property names of your model.
 - This library is designed for relatively small to medium-sized datasets. For large amounts of data, consider using a more robust database solution.
 - The current implementation doesn't handle concurrent access to the Google Sheet. Use caution in multi-user scenarios.
 - Duplicate column mappings will raise exceptions to ensure data integrity.
