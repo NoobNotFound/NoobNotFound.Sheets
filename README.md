@@ -131,7 +131,7 @@ var items = new List<YourModelType>
     new YourModelType { Name = "Bob", Age = 30 },
     new YourModelType { Name = "Charlie", Age = 35 }
 };
-await dbManager.AddOrUpdateBulkAsync(items);
+await dbManager.AddRangeAsync(items);
 ```
 
 #### Pagination
@@ -142,11 +142,15 @@ var page = await dbManager.GetPageAsync(pageNumber: 1, pageSize: 10);
 #### Offline Data with CSV Caching
 Enable CSV caching for offline support:
 ```csharp
-dbManager.EnableLocalCaching("path/to/cache.csv");
-```
+var options = new DatabaseManagerOptions
+  {
+    EnableLocalCache = true,
+    LocalCachePath = "path/to/cache",
+    CacheExpiration = TimeSpan.FromMinutes(10),
+};
 
-#### Retry Policies
-The library retries operations automatically for transient errors. Configure retry settings via Polly.
+dbManager = new DataBaseManager<SampleModel>(credentials, spreadsheetId, sheetName, options);
+```
 
 ---
 
