@@ -124,7 +124,7 @@ var allItems = await dbManager.GetAllAsync();
 
 ### Advanced Features
 
-#### Bulk Add or Update
+#### Bulk Add
 ```csharp
 var items = new List<YourModelType>
 {
