@@ -1,17 +1,26 @@
 # NoobNotFound.Sheets
 
-NoobNotFound.Sheets is a .NET library that provides a simple and efficient way to use Google Sheets as a database. It offers a generic `DataBaseManager<T>` class that allows you to perform CRUD (Create, Read, Update, Delete) operations on any model type, making it easy to store and retrieve data using Google Sheets as a backend.
+NoobNotFound.Sheets is a .NET library that simplifies using Google Sheets as a lightweight database. It features a generic `DataBaseManager<T>` class for seamless CRUD (Create, Read, Update, Delete) operations with any model type, along with enhanced caching, bulk operations, and error handling. * ***The majority of this project was developed with the assistance of AI.***
+
+---
 
 ## Features
 
-- Generic implementation for flexibility with any data model
-- Column mapping via attributes for more control over Google Sheets columns
-- Header support
-- Uses `SemaphoreSlim` to avoid conflicts.
-- Asynchronous methods for improved performance
-- CRUD operations: Add, Remove, Search, Update, and Get All
-- Easy setup with Google Sheets API Credidental
-- Support for multiple model types in a single Google Sheets document
+- **Generic Data Model Support**: Perform CRUD operations on any model type.  
+- **Column Mapping via Attributes**: Map model properties to Google Sheets columns using `SheetColumn`.  
+- **Header Support**: Automatically recognizes or adds headers in the sheet for better organization.  
+- **Conflict-Free Execution**: Uses `SemaphoreSlim` to prevent data conflicts during concurrent operations.  
+- **Local CSV Caching**: Work offline and sync later using CsvHelper.  
+- **Memory Caching**: Faster operations by keeping frequently used data in memory.  
+- **Bulk Operations**: Add or update multiple records efficiently in a single operation.  
+- **Retry Policies**: Automatic retries with Polly for transient errors.  
+- **Pagination**: Fetch data in pages for better performance on large datasets.  
+- **Asynchronous Operations**: Non-blocking operations for better performance.  
+- **Multi-Model Support**: Manage multiple data models in a single Google Sheets document.  
+- **Interactive Testing**: Includes a console sample application for feature exploration.  
+
+---
+
 
 ## Installation
 
@@ -32,43 +41,42 @@ dotnet add package NoobNotFound.Sheets
 ```
 </details>
 
-Download the dlls from the resources and add it to your project.
+1. **Clone the Repository**: Build and use the library directly from the source.
+2. **Download DLL**: Obtain precompiled DLLs from the repository's releases and reference them in your project.
 
-Or you can clone this repository and build your own.
+---
 
 ## Prerequisites
 
 Before using NoobNotFound.Sheets, ensure you have:
 
-1. Set up a Google Cloud Project
-2. Enabled the Google Sheets API
-3. Created and downloaded the credentials (JSON key file) for your service account
+1. **Google Cloud Setup**: Create a project and enable the Google Sheets API.
+2. **Service Account Credentials**: Download the JSON key file for your service account.
+
+---
 
 ## Usage
 
 ### Initialization
 
-To use the `DataBaseManager<T>`, first import the namespace:
+Import the namespace and initialize the `DataBaseManager<T>` with your credentials:
 
 ```csharp
 using NoobNotFound.Sheets;
-```
-
-Then initialize it with your Google Sheets credentials, spreadsheet ID, and sheet name:
-
-```csharp
 using Google.Apis.Auth.OAuth2;
 
-var credential = GoogleCredential.FromFile("path/to/your/credentials.json");
+var credential = GoogleCredential.FromFile("path/to/credentials.json");
 var spreadsheetId = "your-spreadsheet-id";
 var sheetName = "YourSheetName";
 
 var dbManager = new DataBaseManager<YourModelType>(credential, spreadsheetId, sheetName);
 ```
 
-### Adding Data with Column Mapping
+---
 
-You can specify column mappings using the `SheetColumn` attribute to map properties to specific columns in the sheet. This helps you organize your data effectively:
+### Defining a Data Model
+
+Use the `SheetColumn` attribute to map properties to specific columns:
 
 ```csharp
 public class YourModelType
@@ -81,119 +89,87 @@ public class YourModelType
 }
 ```
 
-To add a new item to the sheet:
+---
 
+### CRUD Operations
+
+#### Adding Data
 ```csharp
-var newItem = new YourModelType { Name = "John", Age = 30 };
-bool success = await dbManager.AddAsync(newItem);
+var newItem = new YourModelType { Name = "Alice", Age = 25 };
+await dbManager.AddAsync(newItem);
 ```
 
-### Searching Data
-
-To search for items in the sheet:
-
+#### Searching Data
 ```csharp
-var results = await dbManager.SearchAsync(item => item.Age > 25);
+var results = await dbManager.SearchAsync(item => item.Age > 20);
 ```
 
-### Updating Data
-
-To update existing items in the sheet:
-
+#### Updating Data
 ```csharp
-var updatedItem = new YourModelType { Name = "John", Age = 31 };
-bool success = await dbManager.UpdateAsync(item => item.Name == "John", updatedItem);
+var updatedItem = new YourModelType { Name = "Alice", Age = 26 };
+await dbManager.UpdateAsync(item => item.Name == "Alice", updatedItem);
 ```
 
-### Removing Data
-
-To remove items from the sheet:
-
+#### Removing Data
 ```csharp
-bool success = await dbManager.RemoveAsync(item => item.Name == "John");
+await dbManager.RemoveAsync(item => item.Name == "Alice");
 ```
 
-### Getting All Data
-
-To retrieve all items from the sheet:
-
+#### Retrieving All Data
 ```csharp
 var allItems = await dbManager.GetAllAsync();
 ```
 
-### Conflict Handling
+---
 
-If multiple properties in your model are mapped to the same column using the `SheetColumn` attribute, an `InvalidOperationException` will be thrown. For example:
+### Advanced Features
 
+#### Bulk Add or Update
 ```csharp
-public class MyModel
+var items = new List<YourModelType>
 {
-    [SheetColumn(0)]
-    public string Name { get; set; }
-
-    [SheetColumn(0)]  // This will cause a conflict
-    public int Age { get; set; }
-}
+    new YourModelType { Name = "Bob", Age = 30 },
+    new YourModelType { Name = "Charlie", Age = 35 }
+};
+await dbManager.AddOrUpdateBulkAsync(items);
 ```
 
-This will result in the following exception:
-
-```plaintext
-InvalidOperationException: Duplicate SheetColumn attribute value 0 detected for property Age
-```
-
-Ensure each property in your model has a unique column mapping.
-
-## Example
-
-Here's a complete example of how to use NoobNotFound.Sheets with a `Product` model:
-
+#### Pagination
 ```csharp
-using NoobNotFound.Sheets;
-
-public class Product
-{
-    [SheetColumn(0)]
-    public string Id { get; set; }
-
-    [SheetColumn(1)]
-    public string Name { get; set; }
-
-    [SheetColumn(2)]
-    public decimal Price { get; set; }
-}
-
-// Initialize the database manager
-var productManager = new DataBaseManager<Product>(credential, "spreadsheet-id", "Products");
-
-// Add a new product
-var newProduct = new Product { Id = "P001", Name = "Widget", Price = 19.99m };
-await productManager.AddAsync(newProduct);
-
-// Search for products
-var affordableProducts = await productManager.SearchAsync(p => p.Price < 50);
-
-// Update a product
-var updatedProduct = new Product { Id = "P001", Name = "Super Widget", Price = 24.99m };
-await productManager.UpdateAsync(p => p.Id == "P001", updatedProduct);
-
-// Remove a product
-await productManager.RemoveAsync(p => p.Id == "P001");
-
-// Get all products
-var allProducts = await productManager.GetAllAsync();
+var page = await dbManager.GetPageAsync(pageNumber: 1, pageSize: 10);
 ```
+
+#### Offline Data with CSV Caching
+Enable CSV caching for offline support:
+```csharp
+dbManager.EnableLocalCaching("path/to/cache.csv");
+```
+
+#### Retry Policies
+The library retries operations automatically for transient errors. Configure retry settings via Polly.
+
+---
+
+## Example Console Application
+
+A console application is included to test all library features interactively. Use the menu-driven interface to perform CRUD operations and explore advanced functionalities like bulk actions and caching.
+
+---
 
 ## Limitations
 
-- This library is designed for relatively small to medium-sized datasets. For large amounts of data, consider using a more robust database solution.
-- The current implementation doesn't handle concurrent access to the Google Sheet. Use caution in multi-user scenarios.
-- Duplicate column mappings will raise exceptions to ensure data integrity.
+- **Data Size**: Designed for small to medium-sized datasets.
+- **Concurrent Access**: Does not support multi-user concurrent operations.
+- **Duplicate Columns**: Duplicate mappings in a data model will result in exceptions.
+
+---
 
 ## Contributing
 
-Contributions to improve NoobNotFound.Sheets are welcome. Please feel free to submit issues or pull requests on our GitHub repository.
+Contributions are welcome! Submit issues, feedback, or pull requests on the GitHub repository.
+
+---
 
 ## License
 
-This project is licensed under the GNU License - see the LICENSE file for details.
+This project is licensed under the GNU License. See the LICENSE file for details.
