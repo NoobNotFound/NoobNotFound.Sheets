@@ -13,6 +13,7 @@ using CsvHelper;
 using System.Globalization;
 using Polly;
 using Microsoft.Extensions.Caching.Memory;
+using System.Text.Json;
 
 namespace NoobNotFound.Sheets
 {
@@ -71,7 +72,9 @@ namespace NoobNotFound.Sheets
         {
             var properties = typeof(T).GetProperties()
                 .Where(p => p.GetCustomAttribute<SheetColumnAttribute>() != null)
-                .OrderBy(p => p.GetCustomAttribute<SheetColumnAttribute>().Index);
+                .OrderBy(p => p.GetCustomAttribute<SheetColumnAttribute>().Index)
+             .Concat(typeof(T).GetProperties()
+                .Where(p => p.GetCustomAttribute<SheetColumnAttribute>() == null));
 
             var headerRow = properties.Select(p => p.Name).ToArray();
 
@@ -119,7 +122,7 @@ namespace NoobNotFound.Sheets
         {
             var data = await GetAllAsync(useCache: false);
             var cacheFilePath = Path.Combine(_options.LocalCachePath, $"{_sheetName}_cache.csv");
-
+            _cache.Set($"{_sheetName}_all_data", data, _options.CacheExpiration);
             using var writer = new StreamWriter(cacheFilePath);
             using var csv = new CsvWriter(writer, CultureInfo.InvariantCulture);
             await csv.WriteRecordsAsync(data);
@@ -203,6 +206,7 @@ namespace NoobNotFound.Sheets
         {
             if (useCache && _options.EnableLocalCache)
             {
+                _cache.CreateEntry(_sheetName);
                 var cacheKey = $"{_sheetName}_all_data";
                 if (_cache.TryGetValue(cacheKey, out IEnumerable<T> cachedData))
                     return cachedData;
@@ -317,7 +321,6 @@ namespace NoobNotFound.Sheets
             return response.UpdatedRows > 0;
         }
 
-        // Existing private helper methods (ConvertToRow, ConvertToItem, etc.) remain unchanged
     /// <summary>
     /// Converts an object to a row representation for the sheet.
     /// </summary>
@@ -330,9 +333,7 @@ namespace NoobNotFound.Sheets
 
             var usedIndices = new HashSet<int>();
 
-            int maxIndex = properties
-                .Where(p => p.GetCustomAttributes(typeof(SheetColumnAttribute), false).Length > 0)
-                .Max(p => ((SheetColumnAttribute)p.GetCustomAttributes(typeof(SheetColumnAttribute), false).First()).Index);
+            int maxIndex = properties.Count() - 1;
 
             for (int i = 0; i <= maxIndex; i++)
             {
@@ -350,20 +351,47 @@ namespace NoobNotFound.Sheets
                     }
 
                     var value = prop.GetValue(item);
-                    row[attribute.Index] = value;
+                    row[attribute.Index] = JsonSerializer.Serialize(value, prop.PropertyType);
                     usedIndices.Add(attribute.Index);
+                }
+            }
+            //support for properties without SheetColumn attribute
+            foreach (var prop in properties)
+            {
+                var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
+                if (attribute == null)
+                {
+
+                    for (int i = 0; i <= maxIndex; i++)
+                    {
+                        if (!usedIndices.Contains(i))
+                        {
+                            var value = prop.GetValue(item);
+                            row[i] = JsonSerializer.Serialize(value, prop.PropertyType);
+                            usedIndices.Add(i);
+                            break;
+                        }
+                    }
+
                 }
             }
 
             return row;
         }
 
+       private string LowCaseIfBool(string value)
+        {
+            if (value == "TRUE" || value == "FALSE")
+            return value.ToLower();
 
-    /// <summary>
-    /// Converts a row from the sheet to an object of type T.
-    /// </summary>
-    /// <param name="row">The row data from the sheet.</param>
-    /// <returns>An object of type T populated with the row data.</returns>
+            return value;
+        }
+
+        /// <summary>
+        /// Converts a row from the sheet to an object of type T.
+        /// </summary>
+        /// <param name="row">The row data from the sheet.</param>
+        /// <returns>An object of type T populated with the row data.</returns>
         private T ConvertToItem(IList<object> row)
         {
             var item = new T();
@@ -386,11 +414,41 @@ namespace NoobNotFound.Sheets
                         var cellValue = row[attribute.Index];
                         if (cellValue != null)
                         {
-                            prop.SetValue(item, Convert.ChangeType(cellValue, prop.PropertyType));
+                            prop.SetValue(item, JsonSerializer.Deserialize(LowCaseIfBool(cellValue.ToString()), prop.PropertyType));
                         }
                     }
 
                     usedIndices.Add(attribute.Index);
+                }
+            }
+
+            int maxIndex = properties.Count() - 1;
+
+            //support for properties without SheetColumn attribute
+            foreach (var prop in properties)
+            {
+                var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
+                if (attribute == null)
+                {
+
+                    for (int i = 0; i <= maxIndex; i++)
+                    {
+                        if (i < row.Count)
+                        {
+                            if (!usedIndices.Contains(i))
+                            {
+
+                                var cellValue = row[i];
+                                if (cellValue != null)
+                                {
+                                    prop.SetValue(item, JsonSerializer.Deserialize(LowCaseIfBool(cellValue.ToString()), prop.PropertyType));
+                                }
+                                usedIndices.Add(i);
+                                break;
+                            }
+                        }
+                    }
+
                 }
             }
 
