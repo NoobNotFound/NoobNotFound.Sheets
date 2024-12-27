@@ -1,18 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>AnyCPU;ARM64;x64</Platforms>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Google.Apis" Version="1.68.0" />
-    <PackageReference Include="Google.Apis.Sheets.v4" Version="1.68.0.3525" />
-    <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="9.0.0" />
-    <PackageReference Include="Polly" Version="8.5.0" />
-    <PackageReference Include="CsvHelper" Version="33.0.1" />
+    <PackageReference Include="Google.Apis" />
+    <PackageReference Include="Google.Apis.Sheets.v4" />
+    <PackageReference Include="Microsoft.Extensions.Caching.Memory" />
+    <PackageReference Include="Polly" />
+    <PackageReference Include="CsvHelper" />
   </ItemGroup>
 
 </Project>
