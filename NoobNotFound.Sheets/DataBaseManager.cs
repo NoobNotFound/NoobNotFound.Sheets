@@ -1,4 +1,4 @@
-﻿using Google.Apis.Sheets.v4;
+using Google.Apis.Sheets.v4;
 using Google.Apis.Services;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Sheets.v4.Data;
@@ -343,7 +343,9 @@ namespace NoobNotFound.Sheets
             foreach (var prop in properties)
             {
                 var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
-                if (attribute != null)
+                var ignoreAttribute = (SheetIgnoreAttribute)prop.GetCustomAttributes(typeof(SheetIgnoreAttribute), false).FirstOrDefault();
+                
+                if (attribute != null && ignoreAttribute == null)
                 {
                     if (usedIndices.Contains(attribute.Index))
                     {
@@ -359,7 +361,9 @@ namespace NoobNotFound.Sheets
             foreach (var prop in properties)
             {
                 var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
-                if (attribute == null)
+                var ignoreAttribute = (SheetIgnoreAttribute)prop.GetCustomAttributes(typeof(SheetIgnoreAttribute), false).FirstOrDefault();
+
+                if (attribute == null && ignoreAttribute == null)
                 {
 
                     for (int i = 0; i <= maxIndex; i++)
@@ -402,7 +406,9 @@ namespace NoobNotFound.Sheets
             foreach (var prop in properties)
             {
                 var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
-                if (attribute != null)
+                var ignoreAttribute = (SheetIgnoreAttribute)prop.GetCustomAttributes(typeof(SheetIgnoreAttribute), false).FirstOrDefault();
+
+                if (attribute != null && ignoreAttribute == null)
                 {
                     if (usedIndices.Contains(attribute.Index))
                     {
@@ -428,7 +434,9 @@ namespace NoobNotFound.Sheets
             foreach (var prop in properties)
             {
                 var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
-                if (attribute == null)
+                var ignoreAttribute = (SheetIgnoreAttribute)prop.GetCustomAttributes(typeof(SheetIgnoreAttribute), false).FirstOrDefault();
+
+                if (attribute == null && ignoreAttribute == null)
                 {
 
                     for (int i = 0; i <= maxIndex; i++)

@@ -10,3 +10,11 @@ public class SheetColumnAttribute : Attribute
         Index = index;
     }
 }
+
+[AttributeUsage(AttributeTargets.Property)]
+public class SheetIgnoreAttribute : Attribute
+{
+    public SheetIgnoreAttribute()
+    {
+    }
+}
