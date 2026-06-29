@@ -19,6 +19,7 @@ using System.Linq.Expressions;
 using Polly;
 using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace NoobNotFound.Sheets;
 
@@ -32,6 +33,9 @@ public class DatabaseManagerOptions
     public TimeSpan CacheExpiration { get; set; } = TimeSpan.FromMinutes(5);
     public int MaxRetries { get; set; } = 3;
     public TimeSpan RetryDelay { get; set; } = TimeSpan.FromSeconds(2);
+    public bool EnableQueuedWrites { get; set; } = false;
+    public TimeSpan QueuedWriteDelay { get; set; } = TimeSpan.FromSeconds(1);
+    public TimeSpan QueuedWriteFailureDelay { get; set; } = TimeSpan.FromSeconds(30);
 }
 
 /// <summary>
@@ -54,10 +58,27 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
         public required Action<object, object?> Setter { get; init; }
     }
 
+    private enum QueuedWriteKind
+    {
+        AppendRows,
+        UpdateRows,
+        DeleteRows
+    }
+
+    private sealed class QueuedWrite
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N");
+        public QueuedWriteKind Kind { get; set; }
+        public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+        public List<List<string>> Rows { get; set; } = [];
+        public List<int> DataRowIndices { get; set; } = [];
+    }
+
     private static readonly PropertyInfo[] _properties = typeof(T).GetProperties();
     private static readonly Dictionary<int, ColumnAccessor> _columnMap = BuildColumnMap();
     private static readonly int _columnCount = _columnMap.Count == 0 ? 1 : Math.Max(_columnMap.Keys.Max() + 1, 1);
     private static readonly string _lastColumnLetter = GetColumnLetter(_columnCount - 1);
+    private static readonly JsonSerializerOptions _queueJsonOptions = CreateQueueJsonOptions();
 
     private readonly SheetsService _service;
     private readonly bool _ownsService;
@@ -69,6 +90,11 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
     private readonly DatabaseManagerOptions _options;
     private readonly IMemoryCache _cache;
     private readonly IAsyncPolicy _retryPolicy;
+    private readonly SemaphoreSlim _queueLock = new(1, 1);
+    private readonly SemaphoreSlim _queueSignal = new(0);
+    private readonly CancellationTokenSource _queueDrainCts = new();
+    private readonly List<QueuedWrite> _queuedWrites = [];
+    private Task? _queueDrainTask;
     private int _sheetId;
     private volatile bool _initialized;
     private bool _disposed;
@@ -117,6 +143,9 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
         if (_options.EnableLocalCache && string.IsNullOrWhiteSpace(_options.LocalCachePath))
             throw new ArgumentException("LocalCachePath must be set when EnableLocalCache is true.", nameof(options));
 
+        if (_options.EnableQueuedWrites && !_options.EnableLocalCache)
+            throw new ArgumentException("EnableLocalCache must be true when EnableQueuedWrites is true.", nameof(options));
+
         _dataRange = $"{_sheetName}!A:{_lastColumnLetter}";
         _cache = new MemoryCache(new MemoryCacheOptions());
 
@@ -132,6 +161,16 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
                     _options.RetryDelay.TotalMilliseconds * Math.Pow(2, retryAttempt - 1)));
 
         // NOTE: deliberately no blocking network I/O here. See EnsureInitializedAsync.
+    }
+
+    private static JsonSerializerOptions CreateQueueJsonOptions()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            WriteIndented = true
+        };
+        options.Converters.Add(new JsonStringEnumConverter());
+        return options;
     }
 
     private static SheetsService CreateOwnedService(GoogleCredential credentials, string appName) =>
@@ -215,8 +254,30 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
         if (!Directory.Exists(_options.LocalCachePath))
             Directory.CreateDirectory(_options.LocalCachePath!);
 
-        var data = (await FetchAllFromSheetAsync(ct)).ToList();
+        if (!_options.EnableQueuedWrites)
+        {
+            var fetched = (await FetchAllFromSheetAsync(ct)).ToList();
+            await PersistLocalCacheAsync(fetched);
+            return;
+        }
+
+        await LoadQueuedWritesAsync(ct);
+
+        List<T> data;
+        var cacheFilePath = LocalCacheFilePath;
+        if (_queuedWrites.Count > 0 && File.Exists(cacheFilePath))
+        {
+            data = ReadLocalCacheFile();
+        }
+        else
+        {
+            data = (await FetchAllFromSheetAsync(ct)).ToList();
+            await ReplayQueuedWritesAsync(data, ct);
+        }
+
         await PersistLocalCacheAsync(data);
+        StartQueueDrain();
+        SignalQueueDrainIfPending();
     }
 
     // ------------------------------------------------------------------
@@ -233,6 +294,14 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
         await _semaphore.WaitAsync(ct);
         try
         {
+            if (_options.EnableQueuedWrites)
+            {
+                var snapshot = await GetCachedSnapshotAsync(ct);
+                snapshot.Add(item);
+                await EnqueueQueuedWriteAsync(CreateAppendQueuedWrite([item]), snapshot, ct);
+                return true;
+            }
+
             return await _retryPolicy.ExecuteAsync(async token =>
             {
                 var added = await AddInternalAsync(item, token);
@@ -263,6 +332,14 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
         await _semaphore.WaitAsync(ct);
         try
         {
+            if (_options.EnableQueuedWrites)
+            {
+                var snapshot = await GetCachedSnapshotAsync(ct);
+                snapshot.AddRange(itemList);
+                await EnqueueQueuedWriteAsync(CreateAppendQueuedWrite(itemList), snapshot, ct);
+                return true;
+            }
+
             return await _retryPolicy.ExecuteAsync(async token =>
             {
                 var values = itemList.Select(i => (IList<object>)ConvertToRow(i)).ToList();
@@ -327,6 +404,9 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
 
             // Cache enabled but cold (e.g. file was deleted out-of-band): fetch once and reseed.
             var fetched = (await FetchAllFromSheetAsync(ct)).ToList();
+            if (_options.EnableQueuedWrites)
+                await ReplayQueuedWritesAsync(fetched, ct);
+
             await PersistLocalCacheAsync(fetched);
             return fetched;
         }
@@ -353,6 +433,9 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
         await _semaphore.WaitAsync(ct);
         try
         {
+            if (_options.EnableQueuedWrites)
+                return await QueueUpdateAsync(predicate, updatedItem, ct);
+
             return await _retryPolicy.ExecuteAsync(async token =>
             {
                 var (hasChanges, allItems, changes) = await BuildUpdatePlanAsync(predicate, updatedItem, token);
@@ -381,6 +464,9 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
         await _semaphore.WaitAsync(ct);
         try
         {
+            if (_options.EnableQueuedWrites)
+                return await QueueRemoveAsync(predicate, ct);
+
             return await _retryPolicy.ExecuteAsync(async token =>
             {
                 var (removed, remaining) = await RemoveInternalAsync(predicate, token);
@@ -408,8 +494,20 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
 
         if (disposing)
         {
+            _queueDrainCts.Cancel();
+            try
+            {
+                _queueDrainTask?.Wait(TimeSpan.FromSeconds(5));
+            }
+            catch (AggregateException ex) when (ex.InnerExceptions.All(e => e is OperationCanceledException))
+            {
+            }
+
             _semaphore.Dispose();
             _initLock.Dispose();
+            _queueLock.Dispose();
+            _queueSignal.Dispose();
+            _queueDrainCts.Dispose();
             if (_ownsService)
                 _service.Dispose();
             (_cache as IDisposable)?.Dispose();
@@ -425,6 +523,21 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
     private async Task<bool> AddInternalAsync(T item, CancellationToken ct)
     {
         var values = new List<IList<object>> { ConvertToRow(item) };
+        var valueRange = new ValueRange { Values = values };
+
+        var request = _service.Spreadsheets.Values.Append(valueRange, _spreadsheetId, _dataRange);
+        request.ValueInputOption = SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
+
+        var response = await request.ExecuteAsync(ct);
+        return (response.Updates?.UpdatedRows ?? 0) > 0;
+    }
+
+    private async Task<bool> AppendRowsAsync(IReadOnlyCollection<List<string>> rows, CancellationToken ct)
+    {
+        if (rows.Count == 0)
+            return false;
+
+        var values = rows.Select(row => (IList<object>)row.Cast<object>().ToList()).ToList();
         var valueRange = new ValueRange { Values = values };
 
         var request = _service.Spreadsheets.Values.Append(valueRange, _spreadsheetId, _dataRange);
@@ -497,6 +610,114 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
         return (true, remaining);
     }
 
+    private async Task<bool> QueueUpdateAsync(Func<T, bool> predicate, T updatedItem, CancellationToken ct)
+    {
+        var snapshot = await GetCachedSnapshotAsync(ct);
+        var dataRowIndices = new List<int>();
+        var rows = new List<List<string>>();
+
+        for (int i = 0; i < snapshot.Count; i++)
+        {
+            if (!predicate(snapshot[i]))
+                continue;
+
+            snapshot[i] = updatedItem;
+            dataRowIndices.Add(i);
+            rows.Add(ConvertToQueuedRow(updatedItem));
+        }
+
+        if (dataRowIndices.Count == 0)
+            return false;
+
+        await EnqueueQueuedWriteAsync(new QueuedWrite
+        {
+            Kind = QueuedWriteKind.UpdateRows,
+            DataRowIndices = dataRowIndices,
+            Rows = rows
+        }, snapshot, ct);
+
+        return true;
+    }
+
+    private async Task<bool> QueueRemoveAsync(Func<T, bool> predicate, CancellationToken ct)
+    {
+        var snapshot = await GetCachedSnapshotAsync(ct);
+        var dataRowIndices = new List<int>();
+        var remaining = new List<T>(snapshot.Count);
+
+        for (int i = 0; i < snapshot.Count; i++)
+        {
+            var item = snapshot[i];
+            if (predicate(item))
+            {
+                dataRowIndices.Add(i);
+            }
+            else
+            {
+                remaining.Add(item);
+            }
+        }
+
+        if (dataRowIndices.Count == 0)
+            return false;
+
+        await EnqueueQueuedWriteAsync(new QueuedWrite
+        {
+            Kind = QueuedWriteKind.DeleteRows,
+            DataRowIndices = dataRowIndices
+        }, remaining, ct);
+
+        return true;
+    }
+
+    private static QueuedWrite CreateAppendQueuedWrite(IEnumerable<T> items) => new()
+    {
+        Kind = QueuedWriteKind.AppendRows,
+        Rows = items.Select(ConvertToQueuedRow).ToList()
+    };
+
+    private async Task ApplyQueuedWriteAsync(QueuedWrite write, CancellationToken ct)
+    {
+        bool applied = write.Kind switch
+        {
+            QueuedWriteKind.AppendRows => await AppendRowsAsync(write.Rows, ct),
+            QueuedWriteKind.UpdateRows => await ApplyQueuedUpdateAsync(write, ct),
+            QueuedWriteKind.DeleteRows => await ApplyQueuedDeleteAsync(write, ct),
+            _ => throw new InvalidOperationException($"Unsupported queued write kind '{write.Kind}'.")
+        };
+
+        if (!applied)
+            throw new InvalidOperationException($"Queued write '{write.Id}' did not update any rows.");
+    }
+
+    private async Task<bool> ApplyQueuedUpdateAsync(QueuedWrite write, CancellationToken ct)
+    {
+        if (write.DataRowIndices.Count != write.Rows.Count)
+            throw new InvalidOperationException($"Queued update '{write.Id}' has mismatched row data.");
+
+        var changes = new List<ValueRange>(write.Rows.Count);
+        for (int i = 0; i < write.Rows.Count; i++)
+        {
+            int sheetRow = write.DataRowIndices[i] + 2; // header row plus 1-based Sheets row numbers
+            changes.Add(new ValueRange
+            {
+                Range = $"{_sheetName}!A{sheetRow}:{_lastColumnLetter}{sheetRow}",
+                Values = new List<IList<object>> { write.Rows[i].Cast<object>().ToList() }
+            });
+        }
+
+        return await ApplyUpdatePlanAsync(changes, ct);
+    }
+
+    private async Task<bool> ApplyQueuedDeleteAsync(QueuedWrite write, CancellationToken ct)
+    {
+        if (write.DataRowIndices.Count == 0)
+            return false;
+
+        await BatchDeleteRowsAsync(write.DataRowIndices.Select(index => index + 1).ToList(), ct);
+        return true;
+    }
+
     private async Task BatchDeleteRowsAsync(List<int> rowIndices, CancellationToken ct)
     {
         rowIndices.Sort((a, b) => b.CompareTo(a));
@@ -549,6 +770,8 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
 
     private string LocalCacheFilePath => Path.Combine(_options.LocalCachePath!, $"{_sheetName}_cache.csv");
 
+    private string QueuedWritesFilePath => Path.Combine(_options.LocalCachePath!, $"{_sheetName}_queue.json");
+
     /// <summary>
     /// Returns a fresh, mutable copy of the current snapshot (cache, falling back to the CSV file, falling
     /// back to a live fetch). Always returns a NEW list so callers can mutate it without corrupting a list
@@ -562,12 +785,21 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
         var cacheFilePath = LocalCacheFilePath;
         if (File.Exists(cacheFilePath))
         {
-            using var reader = new StreamReader(cacheFilePath);
-            using var csv = new CsvReader(reader, CultureInfo.InvariantCulture);
-            return csv.GetRecords<T>().ToList();
+            return ReadLocalCacheFile();
         }
 
-        return (await FetchAllFromSheetAsync(ct)).ToList();
+        var fetched = (await FetchAllFromSheetAsync(ct)).ToList();
+        if (_options.EnableQueuedWrites)
+            await ReplayQueuedWritesAsync(fetched, ct);
+
+        return fetched;
+    }
+
+    private List<T> ReadLocalCacheFile()
+    {
+        using var reader = new StreamReader(LocalCacheFilePath);
+        using var csv = new CsvReader(reader, CultureInfo.InvariantCulture);
+        return csv.GetRecords<T>().ToList();
     }
 
     private async Task PersistLocalCacheAsync(List<T> data)
@@ -580,6 +812,176 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
         using var writer = new StreamWriter(LocalCacheFilePath);
         using var csv = new CsvWriter(writer, CultureInfo.InvariantCulture);
         await csv.WriteRecordsAsync(data);
+    }
+
+    // ------------------------------------------------------------------
+    // Durable queued write helpers
+    // ------------------------------------------------------------------
+
+    private async Task LoadQueuedWritesAsync(CancellationToken ct)
+    {
+        _queuedWrites.Clear();
+
+        if (!File.Exists(QueuedWritesFilePath))
+            return;
+
+        using var stream = new FileStream(QueuedWritesFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var loaded = await JsonSerializer.DeserializeAsync<List<QueuedWrite>>(stream, _queueJsonOptions, ct);
+        if (loaded is not null)
+            _queuedWrites.AddRange(loaded);
+    }
+
+    private async Task EnqueueQueuedWriteAsync(QueuedWrite write, List<T> updatedSnapshot, CancellationToken ct)
+    {
+        await _queueLock.WaitAsync(ct);
+        try
+        {
+            _queuedWrites.Add(write);
+            await PersistQueuedWritesLockedAsync(ct);
+            await PersistLocalCacheAsync(updatedSnapshot);
+        }
+        finally
+        {
+            _queueLock.Release();
+        }
+
+        SignalQueueDrainIfPending();
+    }
+
+    private async Task PersistQueuedWritesLockedAsync(CancellationToken ct)
+    {
+        var tempPath = QueuedWritesFilePath + ".tmp";
+        await using (var stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            await JsonSerializer.SerializeAsync(stream, _queuedWrites, _queueJsonOptions, ct);
+        }
+
+        File.Move(tempPath, QueuedWritesFilePath, overwrite: true);
+    }
+
+    private void StartQueueDrain()
+    {
+        if (_queueDrainTask is not null)
+            return;
+
+        _queueDrainTask = Task.Run(() => DrainQueuedWritesAsync(_queueDrainCts.Token));
+    }
+
+    private void SignalQueueDrainIfPending()
+    {
+        if (!_options.EnableQueuedWrites || _queuedWrites.Count == 0)
+            return;
+
+        _queueSignal.Release();
+    }
+
+    private async Task DrainQueuedWritesAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await _queueSignal.WaitAsync(ct);
+
+                while (!ct.IsCancellationRequested)
+                {
+                    var write = await PeekQueuedWriteAsync(ct);
+                    if (write is null)
+                        break;
+
+                    try
+                    {
+                        await _retryPolicy.ExecuteAsync(async token => await ApplyQueuedWriteAsync(write, token), ct);
+                        await RemoveQueuedWriteAsync(write.Id, ct);
+                        await Task.Delay(_options.QueuedWriteDelay, ct);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        await Task.Delay(_options.QueuedWriteFailureDelay, ct);
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+    }
+
+    private async Task<QueuedWrite?> PeekQueuedWriteAsync(CancellationToken ct)
+    {
+        await _queueLock.WaitAsync(ct);
+        try
+        {
+            return _queuedWrites.Count == 0 ? null : _queuedWrites[0];
+        }
+        finally
+        {
+            _queueLock.Release();
+        }
+    }
+
+    private async Task RemoveQueuedWriteAsync(string id, CancellationToken ct)
+    {
+        await _queueLock.WaitAsync(ct);
+        try
+        {
+            var index = _queuedWrites.FindIndex(write => write.Id == id);
+            if (index < 0)
+                return;
+
+            _queuedWrites.RemoveAt(index);
+            await PersistQueuedWritesLockedAsync(ct);
+        }
+        finally
+        {
+            _queueLock.Release();
+        }
+    }
+
+    private void ReplayQueuedWrites(List<T> snapshot)
+    {
+        foreach (var write in _queuedWrites)
+        {
+            switch (write.Kind)
+            {
+                case QueuedWriteKind.AppendRows:
+                    snapshot.AddRange(write.Rows.Select(ConvertQueuedRowToItem));
+                    break;
+                case QueuedWriteKind.UpdateRows:
+                    for (int i = 0; i < write.Rows.Count && i < write.DataRowIndices.Count; i++)
+                    {
+                        int index = write.DataRowIndices[i];
+                        if (index >= 0 && index < snapshot.Count)
+                            snapshot[index] = ConvertQueuedRowToItem(write.Rows[i]);
+                    }
+                    break;
+                case QueuedWriteKind.DeleteRows:
+                    foreach (var index in write.DataRowIndices.OrderByDescending(i => i))
+                    {
+                        if (index >= 0 && index < snapshot.Count)
+                            snapshot.RemoveAt(index);
+                    }
+                    break;
+            }
+        }
+    }
+
+    private async Task ReplayQueuedWritesAsync(List<T> snapshot, CancellationToken ct)
+    {
+        await _queueLock.WaitAsync(ct);
+        try
+        {
+            ReplayQueuedWrites(snapshot);
+        }
+        finally
+        {
+            _queueLock.Release();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -686,6 +1088,14 @@ public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
 
         return row;
     }
+
+    private static List<string> ConvertToQueuedRow(T item) =>
+        ConvertToRow(item)
+            .Select(value => Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty)
+            .ToList();
+
+    private static T ConvertQueuedRowToItem(List<string> row) =>
+        ConvertToItem(row.Cast<object>().ToList());
 
     private static T ConvertToItem(IList<object> row)
     {

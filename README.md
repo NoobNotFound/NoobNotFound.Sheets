@@ -17,6 +17,7 @@ the assistance of AI.*
 - **Singleton-Safe by Design** — ships an `IDataBaseManager<T>` abstraction and a constructor that accepts a shared `SheetsService`, so multiple models against the same spreadsheet don't each spin up their own `HttpClient`.
 - **Conflict-Free Execution** — a `SemaphoreSlim` serializes writes against a given sheet (see [Singleton Usage](#singleton-usage--dependency-injection) — this only works correctly if the manager is registered as a singleton).
 - **Local CSV Caching** — work offline and sync later. Cache updates patch the existing snapshot instead of re-fetching the whole sheet on every write.
+- **Durable Queued Writes** — optionally acknowledge writes after the local cache is updated, then sync them to Google Sheets in the background to reduce request latency and smooth over API rate limits.
 - **Memory Caching** — faster reads by keeping frequently-used data in memory.
 - **Bulk Operations** — add multiple records in a single batch call.
 - **Targeted Updates** — `UpdateAsync` rewrites only the rows that actually changed, not the entire sheet.
@@ -239,6 +240,31 @@ just to keep the cache fresh.
 
 `GetAllAsync(useCache: false)` bypasses the cache entirely and always hits the network.
 
+### Queued Writes
+
+Queued writes are optional and build on local caching. When `EnableQueuedWrites` is true, writes update the
+CSV/in-memory cache and append a durable JSON queue entry first; `AddAsync`, `AddRangeAsync`,
+`UpdateAsync`, and `RemoveAsync` then return `true` without waiting for Google Sheets. A background worker
+drains the queue FIFO, removes an entry only after Sheets confirms it, and retries transient failures using
+the retry policy before waiting `QueuedWriteFailureDelay` and trying again.
+
+```csharp
+var options = new DatabaseManagerOptions
+{
+    EnableLocalCache = true,
+    LocalCachePath = "path/to/cache",
+    EnableQueuedWrites = true,
+    QueuedWriteDelay = TimeSpan.FromSeconds(1),
+    QueuedWriteFailureDelay = TimeSpan.FromSeconds(30),
+};
+```
+
+Queued mode requires `EnableLocalCache = true` and a non-empty `LocalCachePath`. Pending operations are
+stored next to the CSV cache as `{sheetName}_queue.json`, survive process restarts, and resume draining
+after `EnsureReadyAsync()` or the first database call initializes the manager. Reads through
+`GetAllAsync()` see the local cached state immediately; Google Sheets is eventually consistent until the
+queue drains.
+
 ---
 
 ## Singleton Usage & Dependency Injection
@@ -318,6 +344,7 @@ var options = new DatabaseManagerOptions
 {
     MaxRetries = 5,
     RetryDelay = TimeSpan.FromSeconds(1), // base delay; backs off exponentially from here
+    QueuedWriteFailureDelay = TimeSpan.FromSeconds(30), // used after a queued write exhausts retries
 };
 ```
 

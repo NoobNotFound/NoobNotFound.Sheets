@@ -53,7 +53,12 @@ public class Program
             LocalCachePath = "./Cache",
             CacheExpiration = TimeSpan.FromMinutes(10),
             MaxRetries = 3,
-            RetryDelay = TimeSpan.FromSeconds(2)
+            RetryDelay = TimeSpan.FromSeconds(2),
+
+            // Optional: return after the local cache is updated, then sync to Google Sheets in the background.
+            // EnableQueuedWrites = true,
+            // QueuedWriteDelay = TimeSpan.FromSeconds(1),
+            // QueuedWriteFailureDelay = TimeSpan.FromSeconds(30)
         };
 
         // This console only ever talks to one model, so it's fine for the manager to own its own
