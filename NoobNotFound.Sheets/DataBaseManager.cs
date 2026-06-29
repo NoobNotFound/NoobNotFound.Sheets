@@ -1,3 +1,4 @@
+using Google;
 using Google.Apis.Sheets.v4;
 using Google.Apis.Services;
 using Google.Apis.Auth.OAuth2;
@@ -5,12 +6,16 @@ using Google.Apis.Sheets.v4.Data;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Reflection;
 using System.IO;
 using CsvHelper;
 using System.Globalization;
+using System.Text;
+using System.Linq.Expressions;
 using Polly;
 using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
@@ -23,126 +28,222 @@ namespace NoobNotFound.Sheets;
 public class DatabaseManagerOptions
 {
     public bool EnableLocalCache { get; set; } = false;
-    public string LocalCachePath { get; set; }
+    public string? LocalCachePath { get; set; }
     public TimeSpan CacheExpiration { get; set; } = TimeSpan.FromMinutes(5);
     public int MaxRetries { get; set; } = 3;
     public TimeSpan RetryDelay { get; set; } = TimeSpan.FromSeconds(2);
 }
 
 /// <summary>
-/// Manages database operations on Google Sheets with support for local caching and advanced features
+/// Manages database operations on Google Sheets with support for local caching and advanced features.
+///
+/// THREAD-SAFETY / LIFETIME: this type is designed to be used as a long-lived singleton (one instance
+/// per model type T, per spreadsheet+sheet). Its internal SemaphoreSlim is what serializes concurrent
+/// writes against the same sheet -- if you register this as Scoped or Transient in a DI container, every
+/// resolution gets its own semaphore and the "conflict-free execution" guarantee silently stops working.
 /// </summary>
-public class DataBaseManager<T> : IDisposable where T : class, new()
+public class DataBaseManager<T> : IDataBaseManager<T> where T : class, new()
 {
+    // ---- Per-T reflection metadata, computed once instead of on every row ----
+    // Getter/Setter are compiled expression-tree delegates rather than PropertyInfo.GetValue/SetValue --
+    // built once per property here, then called like ordinary delegates for every cell of every row.
+    private sealed class ColumnAccessor
+    {
+        public required PropertyInfo Property { get; init; }
+        public required Func<object, object?> Getter { get; init; }
+        public required Action<object, object?> Setter { get; init; }
+    }
+
+    private static readonly PropertyInfo[] _properties = typeof(T).GetProperties();
+    private static readonly Dictionary<int, ColumnAccessor> _columnMap = BuildColumnMap();
+    private static readonly int _columnCount = _columnMap.Count == 0 ? 1 : Math.Max(_columnMap.Keys.Max() + 1, 1);
+    private static readonly string _lastColumnLetter = GetColumnLetter(_columnCount - 1);
+
     private readonly SheetsService _service;
+    private readonly bool _ownsService;
     private readonly string _spreadsheetId;
     private readonly string _sheetName;
-    private readonly SemaphoreSlim _semaphore = new SemaphoreSlim(1, 1);
+    private readonly string _dataRange;
+    private readonly SemaphoreSlim _semaphore = new(1, 1);
+    private readonly SemaphoreSlim _initLock = new(1, 1);
     private readonly DatabaseManagerOptions _options;
     private readonly IMemoryCache _cache;
     private readonly IAsyncPolicy _retryPolicy;
     private int _sheetId;
+    private volatile bool _initialized;
     private bool _disposed;
 
     /// <summary>
-    /// Initializes a new instance of the DataBaseManager class with enhanced features
+    /// Creates a manager that owns its own SheetsService (and therefore its own HttpClient / socket pool).
+    /// Fine for a single model. If you have several DataBaseManager&lt;T&gt; instances against the same
+    /// spreadsheet, prefer the SheetsService-accepting overload below and share one service between them.
     /// </summary>
-    public DataBaseManager(GoogleCredential credentials, string spreadsheetId, string sheetName, 
-        DatabaseManagerOptions options = null, string appName = "NoobNotFound.SheetsService")
+    public DataBaseManager(
+        GoogleCredential credentials,
+        string spreadsheetId,
+        string sheetName,
+        DatabaseManagerOptions? options = null,
+        string appName = "NoobNotFound.SheetsService")
+        : this(CreateOwnedService(credentials, appName), spreadsheetId, sheetName, options, ownsService: true)
     {
+    }
+
+    /// <summary>
+    /// Creates a manager backed by a SheetsService you already own (e.g. registered as a singleton and
+    /// shared across every DataBaseManager&lt;T&gt; in your app). This manager will NOT dispose it.
+    /// </summary>
+    public DataBaseManager(
+        SheetsService sheetsService,
+        string spreadsheetId,
+        string sheetName,
+        DatabaseManagerOptions? options = null)
+        : this(sheetsService, spreadsheetId, sheetName, options, ownsService: false)
+    {
+    }
+
+    private DataBaseManager(
+        SheetsService sheetsService,
+        string spreadsheetId,
+        string sheetName,
+        DatabaseManagerOptions? options,
+        bool ownsService)
+    {
+        _service = sheetsService;
+        _ownsService = ownsService;
         _spreadsheetId = spreadsheetId;
         _sheetName = sheetName;
         _options = options ?? new DatabaseManagerOptions();
-        _service = new SheetsService(new BaseClientService.Initializer
+
+        if (_options.EnableLocalCache && string.IsNullOrWhiteSpace(_options.LocalCachePath))
+            throw new ArgumentException("LocalCachePath must be set when EnableLocalCache is true.", nameof(options));
+
+        _dataRange = $"{_sheetName}!A:{_lastColumnLetter}";
+        _cache = new MemoryCache(new MemoryCacheOptions());
+
+        // Only retry genuinely transient failures. Retrying ArgumentException/InvalidOperationException
+        // (e.g. a misconfigured SheetColumn attribute) just adds latency before the same error surfaces.
+        // Deliberately NOT retrying TaskCanceledException: that fires on user-requested cancellation too,
+        // and we don't want to ignore a caller's CancellationToken.
+        _retryPolicy = Policy
+            .Handle<GoogleApiException>(IsTransientGoogleApiException)
+            .Or<HttpRequestException>()
+            .WaitAndRetryAsync(_options.MaxRetries,
+                retryAttempt => TimeSpan.FromMilliseconds(
+                    _options.RetryDelay.TotalMilliseconds * Math.Pow(2, retryAttempt - 1)));
+
+        // NOTE: deliberately no blocking network I/O here. See EnsureInitializedAsync.
+    }
+
+    private static SheetsService CreateOwnedService(GoogleCredential credentials, string appName) =>
+        new SheetsService(new BaseClientService.Initializer
         {
             HttpClientInitializer = credentials,
             ApplicationName = appName
         });
 
-        _cache = new MemoryCache(new MemoryCacheOptions());
-        _retryPolicy = Policy
-            .Handle<Exception>()
-            .WaitAndRetryAsync(_options.MaxRetries, 
-                retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)));
+    private static bool IsTransientGoogleApiException(GoogleApiException ex) =>
+        ex.HttpStatusCode == HttpStatusCode.TooManyRequests || (int)ex.HttpStatusCode >= 500;
 
-        InitializeAsync().GetAwaiter().GetResult();
+    // ------------------------------------------------------------------
+    // Lazy, async-safe initialization (replaces the old blocking ctor call)
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// Ensures the manager is initialized (sheet metadata fetched, header row ensured, local cache warmed
+    /// if enabled). All public methods call this automatically on first use, so you normally don't need to
+    /// call it yourself. Call it explicitly at startup (e.g. from an IHostedService) only if you want
+    /// initialization failures -- like a missing sheet -- to surface before the first real request.
+    /// </summary>
+    public Task EnsureReadyAsync(CancellationToken ct = default) => EnsureInitializedAsync(ct);
+
+    private async Task EnsureInitializedAsync(CancellationToken ct)
+    {
+        if (_initialized) return;
+
+        await _initLock.WaitAsync(ct);
+        try
+        {
+            if (_initialized) return;
+            await InitializeCoreAsync(ct);
+            _initialized = true;
+        }
+        finally
+        {
+            _initLock.Release();
+        }
     }
 
-    private async Task AddHeaderRowAsync()
+    private async Task InitializeCoreAsync(CancellationToken ct)
     {
-        var properties = typeof(T).GetProperties()
-            .Where(p => p.GetCustomAttribute<SheetColumnAttribute>() != null)
-            .OrderBy(p => p.GetCustomAttribute<SheetColumnAttribute>().Index)
-         .Concat(typeof(T).GetProperties()
-            .Where(p => p.GetCustomAttribute<SheetColumnAttribute>() == null));
+        var spreadsheet = await _retryPolicy.ExecuteAsync(
+            async token => await _service.Spreadsheets.Get(_spreadsheetId).ExecuteAsync(token), ct);
 
-        var headerRow = properties.Select(p => p.Name).ToArray();
+        var sheet = spreadsheet.Sheets?.FirstOrDefault(s => s.Properties.Title == _sheetName);
+        if (sheet is null)
+            throw new InvalidOperationException($"Sheet '{_sheetName}' not found in the spreadsheet.");
 
-        var range = $"{_sheetName}!A1:{(char)('A' + headerRow.Count() - 1)}1";
+        _sheetId = sheet.Properties.SheetId ?? 0;
+
+        var headerRange = $"{_sheetName}!A1:{_lastColumnLetter}1";
+        var response = await _retryPolicy.ExecuteAsync(async token =>
+            await _service.Spreadsheets.Values.Get(_spreadsheetId, headerRange).ExecuteAsync(token), ct);
+
+        if (response.Values is null || response.Values.Count == 0)
+            await AddHeaderRowAsync(ct);
+
+        if (_options.EnableLocalCache)
+            await InitializeLocalCacheAsync(ct);
+    }
+
+    private async Task AddHeaderRowAsync(CancellationToken ct)
+    {
+        var headerRow = new object[_columnCount];
+        foreach (var kvp in _columnMap)
+            headerRow[kvp.Key] = kvp.Value.Property.Name;
+
+        var range = $"{_sheetName}!A1:{_lastColumnLetter}1";
         var valueRange = new ValueRange { Values = new List<IList<object>> { headerRow } };
 
         var updateRequest = _service.Spreadsheets.Values.Update(valueRange, _spreadsheetId, range);
         updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.RAW;
 
-        await updateRequest.ExecuteAsync();
+        await updateRequest.ExecuteAsync(ct);
     }
 
-    private async Task InitializeAsync()
-    {
-        var spreadsheet = await _retryPolicy.ExecuteAsync(async () =>
-            await _service.Spreadsheets.Get(_spreadsheetId).ExecuteAsync());
-        
-        var sheet = spreadsheet.Sheets.FirstOrDefault(s => s.Properties.Title == _sheetName);
-        if (sheet == null)
-            throw new Exception($"Sheet '{_sheetName}' not found in the spreadsheet.");
-
-        _sheetId = sheet.Properties.SheetId.Value;
-
-        var range = $"{_sheetName}!A1:Z1";
-        var request = _service.Spreadsheets.Values.Get(_spreadsheetId, range);
-        var response = await request.ExecuteAsync();
-
-        if (response.Values == null || response.Values.Count == 0)
-        {
-            await AddHeaderRowAsync();
-        }
-        if (_options.EnableLocalCache)
-            await InitializeLocalCacheAsync();
-    }
-
-    private async Task InitializeLocalCacheAsync()
+    private async Task InitializeLocalCacheAsync(CancellationToken ct)
     {
         if (!Directory.Exists(_options.LocalCachePath))
-            Directory.CreateDirectory(_options.LocalCachePath);
+            Directory.CreateDirectory(_options.LocalCachePath!);
 
-        await RefreshLocalCacheAsync();
+        var data = (await FetchAllFromSheetAsync(ct)).ToList();
+        await PersistLocalCacheAsync(data);
     }
 
-    private async Task RefreshLocalCacheAsync()
-    {
-        var data = await GetAllAsync(useCache: false);
-        var cacheFilePath = Path.Combine(_options.LocalCachePath, $"{_sheetName}_cache.csv");
-        _cache.Set($"{_sheetName}_all_data", data, _options.CacheExpiration);
-        using var writer = new StreamWriter(cacheFilePath);
-        using var csv = new CsvWriter(writer, CultureInfo.InvariantCulture);
-        await csv.WriteRecordsAsync(data);
-    }
+    // ------------------------------------------------------------------
+    // Public CRUD surface
+    // ------------------------------------------------------------------
 
     /// <summary>
-    /// Adds a new item to the sheet with retry logic and cache update
+    /// Adds a new item to the sheet. If local caching is enabled, the cached snapshot is updated in place
+    /// instead of re-fetching the whole sheet.
     /// </summary>
-    public async Task<bool> AddAsync(T item)
+    public async Task<bool> AddAsync(T item, CancellationToken ct = default)
     {
+        await EnsureInitializedAsync(ct);
+        await _semaphore.WaitAsync(ct);
         try
         {
-            await _semaphore.WaitAsync();
-            return await _retryPolicy.ExecuteAsync(async () =>
+            return await _retryPolicy.ExecuteAsync(async token =>
             {
-                var result = await AddInternalAsync(item);
-                if (result && _options.EnableLocalCache)
-                    await RefreshLocalCacheAsync();
-                return result;
-            });
+                var added = await AddInternalAsync(item, token);
+                if (added && _options.EnableLocalCache)
+                {
+                    var snapshot = await GetCachedSnapshotAsync(token);
+                    snapshot.Add(item);
+                    await PersistLocalCacheAsync(snapshot);
+                }
+                return added;
+            }, ct);
         }
         finally
         {
@@ -151,29 +252,36 @@ public class DataBaseManager<T> : IDisposable where T : class, new()
     }
 
     /// <summary>
-    /// Adds multiple items in a single batch operation
+    /// Adds multiple items in a single batch operation.
     /// </summary>
-    public async Task<bool> AddRangeAsync(IEnumerable<T> items)
+    public async Task<bool> AddRangeAsync(IEnumerable<T> items, CancellationToken ct = default)
     {
+        var itemList = items as IReadOnlyCollection<T> ?? items.ToList();
+        if (itemList.Count == 0) return false;
+
+        await EnsureInitializedAsync(ct);
+        await _semaphore.WaitAsync(ct);
         try
         {
-            await _semaphore.WaitAsync();
-            return await _retryPolicy.ExecuteAsync(async () =>
+            return await _retryPolicy.ExecuteAsync(async token =>
             {
-                var values = items.Select(ConvertToRow).ToList();
-                var range = $"{_sheetName}!A:Z";
+                var values = itemList.Select(i => (IList<object>)ConvertToRow(i)).ToList();
                 var valueRange = new ValueRange { Values = values };
-                
-                var request = _service.Spreadsheets.Values.Append(valueRange, _spreadsheetId, range);
+
+                var request = _service.Spreadsheets.Values.Append(valueRange, _spreadsheetId, _dataRange);
                 request.ValueInputOption = SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
-                
-                var response = await request.ExecuteAsync();
-                
-                if (response.Updates.UpdatedRows > 0 && _options.EnableLocalCache)
-                    await RefreshLocalCacheAsync();
-                    
-                return response.Updates.UpdatedRows > 0;
-            });
+
+                var response = await request.ExecuteAsync(token);
+                var added = (response.Updates?.UpdatedRows ?? 0) > 0;
+
+                if (added && _options.EnableLocalCache)
+                {
+                    var snapshot = await GetCachedSnapshotAsync(token);
+                    snapshot.AddRange(itemList);
+                    await PersistLocalCacheAsync(snapshot);
+                }
+                return added;
+            }, ct);
         }
         finally
         {
@@ -182,71 +290,104 @@ public class DataBaseManager<T> : IDisposable where T : class, new()
     }
 
     /// <summary>
-    /// Retrieves a specific page of items
+    /// Retrieves a specific page of items.
     /// </summary>
-    public async Task<(IEnumerable<T> Items, int TotalPages)> GetPageAsync(int pageSize, int pageNumber)
+    public async Task<(IEnumerable<T> Items, int TotalPages)> GetPageAsync(int pageSize, int pageNumber, CancellationToken ct = default)
     {
         if (pageSize <= 0 || pageNumber <= 0)
             throw new ArgumentException("Page size and number must be positive.");
 
-        var allData = await GetAllAsync();
-        var totalItems = allData.Count();
-        var totalPages = (int)Math.Ceiling(totalItems / (double)pageSize);
+        var allData = (await GetAllAsync(ct: ct)).ToList();
+        var totalPages = (int)Math.Ceiling(allData.Count / (double)pageSize);
 
-        return (
-            allData.Skip((pageNumber - 1) * pageSize).Take(pageSize),
-            totalPages
-        );
+        return (allData.Skip((pageNumber - 1) * pageSize).Take(pageSize), totalPages);
     }
 
     /// <summary>
-    /// Retrieves all items with optional caching
+    /// Retrieves all items, preferring the in-memory/local cache when enabled and warm.
     /// </summary>
-    public async Task<IEnumerable<T>> GetAllAsync(bool useCache = true)
+    public async Task<IEnumerable<T>> GetAllAsync(bool useCache = true, CancellationToken ct = default)
     {
+        await EnsureInitializedAsync(ct);
+
         if (useCache && _options.EnableLocalCache)
         {
-            _cache.CreateEntry(_sheetName);
-            var cacheKey = $"{_sheetName}_all_data";
-            if (_cache.TryGetValue(cacheKey, out IEnumerable<T> cachedData))
-                return cachedData;
+            if (_cache.TryGetValue(CacheKey, out List<T>? cached) && cached is not null)
+                return cached;
 
-            var cacheFilePath = Path.Combine(_options.LocalCachePath, $"{_sheetName}_cache.csv");
+            var cacheFilePath = LocalCacheFilePath;
             if (File.Exists(cacheFilePath))
             {
                 using var reader = new StreamReader(cacheFilePath);
                 using var csv = new CsvReader(reader, CultureInfo.InvariantCulture);
                 var data = csv.GetRecords<T>().ToList();
-                
-                _cache.Set(cacheKey, data, TimeSpan.FromMinutes(5));
+                _cache.Set(CacheKey, data, _options.CacheExpiration);
                 return data;
             }
+
+            // Cache enabled but cold (e.g. file was deleted out-of-band): fetch once and reseed.
+            var fetched = (await FetchAllFromSheetAsync(ct)).ToList();
+            await PersistLocalCacheAsync(fetched);
+            return fetched;
         }
 
-        return await _retryPolicy.ExecuteAsync(async () =>
-        {
-            var range = $"{_sheetName}!A:Z";
-            var request = _service.Spreadsheets.Values.Get(_spreadsheetId, range);
-            var response = await request.ExecuteAsync();
-            return response.Values.Skip(1).Select(ConvertToItem);
-        });
+        return await FetchAllFromSheetAsync(ct);
     }
 
     /// <summary>
-    /// Updates items with retry logic and cache refresh
+    /// Searches for items in the sheet based on a predicate.
     /// </summary>
-    public async Task<bool> UpdateAsync(Func<T, bool> predicate, T updatedItem)
+    public async Task<IEnumerable<T>> SearchAsync(Func<T, bool> predicate, CancellationToken ct = default)
     {
+        var allData = await GetAllAsync(ct: ct);
+        return allData.Where(predicate);
+    }
+
+    /// <summary>
+    /// Updates items matching the predicate. Only the matching rows are rewritten on the sheet
+    /// (a targeted batchUpdate), rather than rewriting every row.
+    /// </summary>
+    public async Task<bool> UpdateAsync(Func<T, bool> predicate, T updatedItem, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await _semaphore.WaitAsync(ct);
         try
         {
-            await _semaphore.WaitAsync();
-            return await _retryPolicy.ExecuteAsync(async () =>
+            return await _retryPolicy.ExecuteAsync(async token =>
             {
-                var result = await UpdateInternalAsync(predicate, updatedItem);
-                if (result && _options.EnableLocalCache)
-                    await RefreshLocalCacheAsync();
-                return result;
-            });
+                var (hasChanges, allItems, changes) = await BuildUpdatePlanAsync(predicate, updatedItem, token);
+                if (!hasChanges)
+                    return false;
+
+                var updated = await ApplyUpdatePlanAsync(changes, token);
+                if (updated && _options.EnableLocalCache)
+                    await PersistLocalCacheAsync(allItems);
+
+                return updated;
+            }, ct);
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
+    }
+
+    /// <summary>
+    /// Removes items from the sheet based on a predicate.
+    /// </summary>
+    public async Task<bool> RemoveAsync(Func<T, bool> predicate, CancellationToken ct = default)
+    {
+        await EnsureInitializedAsync(ct);
+        await _semaphore.WaitAsync(ct);
+        try
+        {
+            return await _retryPolicy.ExecuteAsync(async token =>
+            {
+                var (removed, remaining) = await RemoveInternalAsync(predicate, token);
+                if (removed && _options.EnableLocalCache)
+                    await PersistLocalCacheAsync(remaining);
+                return removed;
+            }, ct);
         }
         finally
         {
@@ -267,301 +408,348 @@ public class DataBaseManager<T> : IDisposable where T : class, new()
 
         if (disposing)
         {
-            _semaphore?.Dispose();
-            _service?.Dispose();
+            _semaphore.Dispose();
+            _initLock.Dispose();
+            if (_ownsService)
+                _service.Dispose();
             (_cache as IDisposable)?.Dispose();
         }
 
         _disposed = true;
     }
 
-    // Private helper methods remain largely unchanged, just add retry logic where needed
-    private async Task<bool> AddInternalAsync(T item) 
+    // ------------------------------------------------------------------
+    // Internal operations
+    // ------------------------------------------------------------------
+
+    private async Task<bool> AddInternalAsync(T item, CancellationToken ct)
     {
         var values = new List<IList<object>> { ConvertToRow(item) };
-        var range = $"{_sheetName}!A:Z";
         var valueRange = new ValueRange { Values = values };
-        
-        var request = _service.Spreadsheets.Values.Append(valueRange, _spreadsheetId, range);
+
+        var request = _service.Spreadsheets.Values.Append(valueRange, _spreadsheetId, _dataRange);
         request.ValueInputOption = SpreadsheetsResource.ValuesResource.AppendRequest.ValueInputOptionEnum.USERENTERED;
-        
-        var response = await request.ExecuteAsync();
-        return response.Updates.UpdatedRows > 0;
+
+        var response = await request.ExecuteAsync(ct);
+        return (response.Updates?.UpdatedRows ?? 0) > 0;
     }
 
-    private async Task<bool> UpdateInternalAsync(Func<T, bool> predicate, T updatedItem)
+    private async Task<(bool HasChanges, List<T> AllItems, List<ValueRange> Changes)> BuildUpdatePlanAsync(
+        Func<T, bool> predicate, T updatedItem, CancellationToken ct)
     {
-        var rows = await GetAllRowsAsync();
-        var updatedRows = new List<IList<object>> { rows[0] };
-        bool updated = false;
+        var rows = await GetAllRowsAsync(ct);
+        var allItems = new List<T>(Math.Max(0, rows.Count - 1));
+        var changes = new List<ValueRange>();
 
-        for (int i = 1; i < rows.Count; i++)
+        for (int i = 1; i < rows.Count; i++) // skip header
         {
             var item = ConvertToItem(rows[i]);
             if (predicate(item))
             {
-                updatedRows.Add(ConvertToRow(updatedItem));
-                updated = true;
+                allItems.Add(updatedItem);
+                int sheetRow = i + 1; // 1-based row number on the actual sheet
+                changes.Add(new ValueRange
+                {
+                    Range = $"{_sheetName}!A{sheetRow}:{_lastColumnLetter}{sheetRow}",
+                    Values = new List<IList<object>> { ConvertToRow(updatedItem) }
+                });
             }
             else
             {
-                updatedRows.Add(rows[i]);
+                allItems.Add(item);
             }
         }
 
-        if (!updated)
-            return false;
-
-        var range = $"{_sheetName}!A1:Z{rows.Count}";
-        var valueRange = new ValueRange { Values = updatedRows };
-        var updateRequest = _service.Spreadsheets.Values.Update(valueRange, _spreadsheetId, range);
-        updateRequest.ValueInputOption = SpreadsheetsResource.ValuesResource.UpdateRequest.ValueInputOptionEnum.USERENTERED;
-
-        var response = await updateRequest.ExecuteAsync();
-        return response.UpdatedRows > 0;
+        return (changes.Count > 0, allItems, changes);
     }
 
-/// <summary>
-/// Converts an object to a row representation for the sheet.
-/// </summary>
-/// <param name="item">The item to be converted.</param>
-/// <returns>An IList of objects representing the item's properties.</returns>
-    private IList<object> ConvertToRow(T item)
+    private async Task<bool> ApplyUpdatePlanAsync(List<ValueRange> changes, CancellationToken ct)
     {
-        var row = new List<object>();
-        var properties = typeof(T).GetProperties();
-
-        var usedIndices = new HashSet<int>();
-
-        int maxIndex = properties.Count() - 1;
-
-        for (int i = 0; i <= maxIndex; i++)
+        var batchRequest = new BatchUpdateValuesRequest
         {
-            row.Add(null);
+            ValueInputOption = "USER_ENTERED",
+            Data = changes
+        };
+
+        var response = await _service.Spreadsheets.Values.BatchUpdate(batchRequest, _spreadsheetId).ExecuteAsync(ct);
+        return (response.TotalUpdatedRows ?? 0) > 0;
+    }
+
+    private async Task<(bool Removed, List<T> Remaining)> RemoveInternalAsync(Func<T, bool> predicate, CancellationToken ct)
+    {
+        var rows = await GetAllRowsAsync(ct);
+        var indicesToRemove = new List<int>();
+        var remaining = new List<T>(Math.Max(0, rows.Count - 1));
+
+        for (int i = 1; i < rows.Count; i++) // skip header
+        {
+            var item = ConvertToItem(rows[i]);
+            if (predicate(item))
+                indicesToRemove.Add(i);
+            else
+                remaining.Add(item);
         }
 
-        foreach (var prop in properties)
+        if (indicesToRemove.Count == 0)
+            return (false, remaining);
+
+        await BatchDeleteRowsAsync(indicesToRemove, ct);
+        return (true, remaining);
+    }
+
+    private async Task BatchDeleteRowsAsync(List<int> rowIndices, CancellationToken ct)
+    {
+        rowIndices.Sort((a, b) => b.CompareTo(a));
+
+        var requests = rowIndices.Select(index => new Request
         {
-            var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
-            var ignoreAttribute = (SheetIgnoreAttribute)prop.GetCustomAttributes(typeof(SheetIgnoreAttribute), false).FirstOrDefault();
-            
-            if (attribute != null && ignoreAttribute == null)
+            DeleteDimension = new DeleteDimensionRequest
             {
-                if (usedIndices.Contains(attribute.Index))
+                Range = new DimensionRange
                 {
-                    throw new InvalidOperationException($"Duplicate SheetColumn attribute value {attribute.Index} detected for property {prop.Name}");
+                    SheetId = _sheetId,
+                    Dimension = "ROWS",
+                    StartIndex = index,
+                    EndIndex = index + 1
                 }
-
-                var value = prop.GetValue(item);
-                row[attribute.Index] = JsonSerializer.Serialize(value, prop.PropertyType);
-                usedIndices.Add(attribute.Index);
             }
-        }
-        //support for properties without SheetColumn attribute
-        foreach (var prop in properties)
+        }).ToList();
+
+        var batchUpdateRequest = new BatchUpdateSpreadsheetRequest { Requests = requests };
+        await _service.Spreadsheets.BatchUpdate(batchUpdateRequest, _spreadsheetId).ExecuteAsync(ct);
+    }
+
+    private async Task<IList<IList<object>>> GetAllRowsAsync(CancellationToken ct)
+    {
+        return await _retryPolicy.ExecuteAsync(async token =>
         {
-            var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
-            var ignoreAttribute = (SheetIgnoreAttribute)prop.GetCustomAttributes(typeof(SheetIgnoreAttribute), false).FirstOrDefault();
+            var request = _service.Spreadsheets.Values.Get(_spreadsheetId, _dataRange);
+            var response = await request.ExecuteAsync(token);
+            return response.Values ?? new List<IList<object>>();
+        }, ct);
+    }
 
-            if (attribute == null && ignoreAttribute == null)
-            {
+    private async Task<IEnumerable<T>> FetchAllFromSheetAsync(CancellationToken ct)
+    {
+        return await _retryPolicy.ExecuteAsync(async token =>
+        {
+            var request = _service.Spreadsheets.Values.Get(_spreadsheetId, _dataRange);
+            var response = await request.ExecuteAsync(token);
+            return response.Values is null
+                ? Enumerable.Empty<T>()
+                : response.Values.Skip(1).Select(ConvertToItem);
+        }, ct);
+    }
 
-                for (int i = 0; i <= maxIndex; i++)
-                {
-                    if (!usedIndices.Contains(i))
-                    {
-                        var value = prop.GetValue(item);
-                        row[i] = JsonSerializer.Serialize(value, prop.PropertyType);
-                        usedIndices.Add(i);
-                        break;
-                    }
-                }
+    // ------------------------------------------------------------------
+    // Local cache helpers (CSV mirror for offline support)
+    // ------------------------------------------------------------------
 
-            }
+    private string CacheKey => $"{_sheetName}_all_data";
+
+    private string LocalCacheFilePath => Path.Combine(_options.LocalCachePath!, $"{_sheetName}_cache.csv");
+
+    /// <summary>
+    /// Returns a fresh, mutable copy of the current snapshot (cache, falling back to the CSV file, falling
+    /// back to a live fetch). Always returns a NEW list so callers can mutate it without corrupting a list
+    /// instance that a concurrent GetAllAsync caller might still be enumerating from the cache.
+    /// </summary>
+    private async Task<List<T>> GetCachedSnapshotAsync(CancellationToken ct)
+    {
+        if (_cache.TryGetValue(CacheKey, out List<T>? cached) && cached is not null)
+            return new List<T>(cached);
+
+        var cacheFilePath = LocalCacheFilePath;
+        if (File.Exists(cacheFilePath))
+        {
+            using var reader = new StreamReader(cacheFilePath);
+            using var csv = new CsvReader(reader, CultureInfo.InvariantCulture);
+            return csv.GetRecords<T>().ToList();
         }
+
+        return (await FetchAllFromSheetAsync(ct)).ToList();
+    }
+
+    private async Task PersistLocalCacheAsync(List<T> data)
+    {
+        _cache.Set(CacheKey, data, _options.CacheExpiration);
+
+        if (string.IsNullOrWhiteSpace(_options.LocalCachePath))
+            return;
+
+        using var writer = new StreamWriter(LocalCacheFilePath);
+        using var csv = new CsvWriter(writer, CultureInfo.InvariantCulture);
+        await csv.WriteRecordsAsync(data);
+    }
+
+    // ------------------------------------------------------------------
+    // Reflection metadata (computed once per T, not per row)
+    // ------------------------------------------------------------------
+
+    private static Dictionary<int, ColumnAccessor> BuildColumnMap()
+    {
+        var map = new Dictionary<int, ColumnAccessor>();
+        var attributed = new List<(PropertyInfo Prop, int Index)>();
+        var unattributed = new List<PropertyInfo>();
+
+        foreach (var prop in _properties)
+        {
+            if (prop.GetCustomAttribute<SheetIgnoreAttribute>() is not null)
+                continue;
+
+            var columnAttr = prop.GetCustomAttribute<SheetColumnAttribute>();
+            if (columnAttr is not null)
+                attributed.Add((prop, columnAttr.Index));
+            else
+                unattributed.Add(prop);
+        }
+
+        foreach (var (prop, index) in attributed)
+        {
+            if (!map.TryAdd(index, CreateAccessor(prop)))
+                throw new InvalidOperationException(
+                    $"Duplicate SheetColumn attribute value {index} detected for property {prop.Name}");
+        }
+
+        int slotCount = Math.Max(_properties.Length, map.Count == 0 ? 0 : map.Keys.Max() + 1);
+        int nextFree = 0;
+        foreach (var prop in unattributed)
+        {
+            while (map.ContainsKey(nextFree)) nextFree++;
+            if (nextFree >= slotCount) slotCount = nextFree + 1;
+            map[nextFree] = CreateAccessor(prop);
+            nextFree++;
+        }
+
+        return map;
+    }
+
+    private static ColumnAccessor CreateAccessor(PropertyInfo prop) => new()
+    {
+        Property = prop,
+        Getter = BuildGetter(prop),
+        Setter = BuildSetter(prop)
+    };
+
+    /// <summary>
+    /// Builds a compiled delegate equivalent to "obj => (object)((T)obj).SomeProperty" -- once compiled,
+    /// this runs close to the speed of a direct property access, unlike PropertyInfo.GetValue which goes
+    /// through reflection's generic invoke path on every call.
+    /// </summary>
+    private static Func<object, object?> BuildGetter(PropertyInfo prop)
+    {
+        var instance = Expression.Parameter(typeof(object), "instance");
+        var typedInstance = Expression.Convert(instance, typeof(T));
+        var propertyAccess = Expression.Property(typedInstance, prop);
+        var boxedResult = Expression.Convert(propertyAccess, typeof(object));
+        return Expression.Lambda<Func<object, object?>>(boxedResult, instance).Compile();
+    }
+
+    /// <summary>
+    /// Builds a compiled delegate equivalent to "(obj, value) => ((T)obj).SomeProperty = (PropType)value".
+    /// Throws at type-load time (not per-row) if the property has no setter -- mark such properties with
+    /// [SheetIgnore] if you don't want them mapped to a column.
+    /// </summary>
+    private static Action<object, object?> BuildSetter(PropertyInfo prop)
+    {
+        var instance = Expression.Parameter(typeof(object), "instance");
+        var value = Expression.Parameter(typeof(object), "value");
+        var typedInstance = Expression.Convert(instance, typeof(T));
+        var propertyAccess = Expression.Property(typedInstance, prop);
+        var typedValue = Expression.Convert(value, prop.PropertyType);
+        var assign = Expression.Assign(propertyAccess, typedValue);
+        return Expression.Lambda<Action<object, object?>>(assign, instance, value).Compile();
+    }
+
+    private static string GetColumnLetter(int zeroBasedIndex)
+    {
+        if (zeroBasedIndex < 0) zeroBasedIndex = 0;
+        int n = zeroBasedIndex + 1;
+        var sb = new StringBuilder();
+        while (n > 0)
+        {
+            int rem = (n - 1) % 26;
+            sb.Insert(0, (char)('A' + rem));
+            n = (n - 1) / 26;
+        }
+        return sb.ToString();
+    }
+
+    private static object[] ConvertToRow(T item)
+    {
+        var row = new object[_columnCount];
+        for (int i = 0; i < row.Length; i++)
+            row[i] = string.Empty;
+
+        foreach (var kvp in _columnMap)
+            row[kvp.Key] = SerializeValue(kvp.Value.Getter(item), kvp.Value.Property.PropertyType);
 
         return row;
     }
 
-   private string LowCaseIfBool(string value)
-    {
-        if (value == "TRUE" || value == "FALSE")
-        return value.ToLower();
-
-        return value;
-    }
-
-    /// <summary>
-    /// Converts a row from the sheet to an object of type T.
-    /// </summary>
-    /// <param name="row">The row data from the sheet.</param>
-    /// <returns>An object of type T populated with the row data.</returns>
-    private T ConvertToItem(IList<object> row)
+    private static T ConvertToItem(IList<object> row)
     {
         var item = new T();
-        var properties = typeof(T).GetProperties();
 
-        var usedIndices = new HashSet<int>();
-
-        foreach (var prop in properties)
+        foreach (var kvp in _columnMap)
         {
-            var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
-            var ignoreAttribute = (SheetIgnoreAttribute)prop.GetCustomAttributes(typeof(SheetIgnoreAttribute), false).FirstOrDefault();
+            int index = kvp.Key;
+            if (index >= row.Count) continue;
 
-            if (attribute != null && ignoreAttribute == null)
-            {
-                if (usedIndices.Contains(attribute.Index))
-                {
-                    throw new InvalidOperationException($"Duplicate SheetColumn attribute value {attribute.Index} detected for property {prop.Name}");
-                }
+            var cellValue = row[index];
+            if (cellValue is null) continue;
 
-                if (attribute.Index < row.Count)
-                {
-                    var cellValue = row[attribute.Index];
-                    if (cellValue != null)
-                    {
-                        prop.SetValue(item, JsonSerializer.Deserialize(LowCaseIfBool(cellValue.ToString()), prop.PropertyType));
-                    }
-                }
-
-                usedIndices.Add(attribute.Index);
-            }
-        }
-
-        int maxIndex = properties.Count() - 1;
-
-        //support for properties without SheetColumn attribute
-        foreach (var prop in properties)
-        {
-            var attribute = (SheetColumnAttribute)prop.GetCustomAttributes(typeof(SheetColumnAttribute), false).FirstOrDefault();
-            var ignoreAttribute = (SheetIgnoreAttribute)prop.GetCustomAttributes(typeof(SheetIgnoreAttribute), false).FirstOrDefault();
-
-            if (attribute == null && ignoreAttribute == null)
-            {
-
-                for (int i = 0; i <= maxIndex; i++)
-                {
-                    if (i < row.Count)
-                    {
-                        if (!usedIndices.Contains(i))
-                        {
-
-                            var cellValue = row[i];
-                            if (cellValue != null)
-                            {
-                                prop.SetValue(item, JsonSerializer.Deserialize(LowCaseIfBool(cellValue.ToString()), prop.PropertyType));
-                            }
-                            usedIndices.Add(i);
-                            break;
-                        }
-                    }
-                }
-
-            }
+            var deserialized = DeserializeValue(cellValue.ToString() ?? string.Empty, kvp.Value.Property.PropertyType);
+            kvp.Value.Setter(item, deserialized);
         }
 
         return item;
     }
 
-
-/// <summary>
-/// Retrieves all rows from the sheet.
-/// </summary>
-/// <returns>An IList of IList of objects representing all rows in the sheet.</returns>
-    private async Task<IList<IList<object>>> GetAllRowsAsync()
-    {
-        var range = $"{_sheetName}!A:Z";
-        var request = _service.Spreadsheets.Values.Get(_spreadsheetId, range);
-        var response = await request.ExecuteAsync();
-        return response.Values;
-    }
-    private async Task BatchDeleteRowsAsync(List<int> rowIndices)
-    {
-        var requests = new List<Request>();
-
-        rowIndices.Sort((a, b) => b.CompareTo(a));
-
-        foreach (var index in rowIndices)
-        {
-            requests.Add(new Request
-            {
-                DeleteDimension = new DeleteDimensionRequest
-                {
-                    Range = new DimensionRange
-                    {
-                        SheetId = _sheetId,
-                        Dimension = "ROWS",
-                        StartIndex = index,
-                        EndIndex = index + 1
-                    }
-                }
-            });
-        }
-
-        var batchUpdateRequest = new BatchUpdateSpreadsheetRequest
-        {
-            Requests = requests
-        };
-
-        await _service.Spreadsheets.BatchUpdate(batchUpdateRequest, _spreadsheetId).ExecuteAsync();
-    }
     /// <summary>
-    /// Searches for items in the sheet based on a predicate.
+    /// Converts a property value into something safe to put in a Sheets cell. Primitives, strings, enums,
+    /// dates, and GUIDs are written as plain/native values. Everything else still round-trips through JSON.
+    ///
+    /// NOTE: this fixes a real bug in the previous implementation, which ran every value -- including
+    /// plain strings -- through JsonSerializer.Serialize. For a string that produces a JSON-quoted string
+    /// (e.g. "Alice" becomes the literal text "\"Alice\""), so every string cell ended up wrapped in quote
+    /// characters when viewed directly in the spreadsheet. If you have existing data written by the old
+    /// version, expect those cells to still contain literal quote characters until rewritten.
     /// </summary>
-    /// <param name="predicate">A function to test each item for a condition.</param>
-    /// <returns>An IEnumerable of items that satisfy the condition.</returns>
-    public async Task<IEnumerable<T>> SearchAsync(Func<T, bool> predicate)
+    private static object SerializeValue(object? value, Type type)
     {
-        var allData = await GetAllAsync();
-        return allData.Where(predicate);
+        if (value is null) return string.Empty;
+
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+
+        if (underlying == typeof(string)) return value;
+        if (underlying.IsEnum) return value.ToString() ?? string.Empty;
+        if (underlying == typeof(bool)) return value;
+        if (underlying.IsPrimitive || underlying == typeof(decimal)) return value;
+        if (underlying == typeof(DateTime)) return ((DateTime)value).ToString("o", CultureInfo.InvariantCulture);
+        if (underlying == typeof(DateTimeOffset)) return ((DateTimeOffset)value).ToString("o", CultureInfo.InvariantCulture);
+        if (underlying == typeof(Guid)) return value.ToString() ?? string.Empty;
+
+        return JsonSerializer.Serialize(value, type);
     }
 
-public async Task<bool> RemoveInternalAsync(Func<T, bool> predicate)
-{
-await _semaphore.WaitAsync();
-var rows = await GetAllRowsAsync();
-var indicesToRemove = new List<int>();
-
-            for (int i = 1; i < rows.Count; i++)  // Start from 1 to skip header
-            {
-                var item = ConvertToItem(rows[i]);
-                if (predicate(item))
-                {
-                    indicesToRemove.Add(i);
-                }
-            }
-
-            if (!indicesToRemove.Any())
-                return false;
-
-            await BatchDeleteRowsAsync(indicesToRemove);
-
-            return true;
-        
-}
-/// <summary>
-/// Removes items from the sheet based on a predicate.
-/// </summary>
-/// <param name="predicate">A function to test each item for a condition.</param>
-/// <returns>A boolean indicating whether any items were removed.</returns>
-    public async Task<bool> RemoveAsync(Func<T, bool> predicate)
+    private static object? DeserializeValue(string text, Type type)
     {
-        
-        try
-        {
-            await _semaphore.WaitAsync();
-            return await _retryPolicy.ExecuteAsync(async () =>
-            {
-                var result = await RemoveInternalAsync(predicate);
-                if (result && _options.EnableLocalCache)
-                    await RefreshLocalCacheAsync();
-                return result;
-            });
-        }
-        finally
-        {
-            _semaphore.Release();
-        }
-        
+        var isNullableValueType = Nullable.GetUnderlyingType(type) is not null;
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+
+        if (string.IsNullOrEmpty(text))
+            return type.IsValueType && !isNullableValueType ? Activator.CreateInstance(type) : null;
+
+        if (underlying == typeof(string)) return text;
+        if (underlying.IsEnum) return Enum.Parse(underlying, text, ignoreCase: true);
+        if (underlying == typeof(bool)) return bool.Parse(text);
+        if (underlying == typeof(Guid)) return Guid.Parse(text);
+        if (underlying == typeof(DateTime)) return DateTime.Parse(text, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        if (underlying == typeof(DateTimeOffset)) return DateTimeOffset.Parse(text, CultureInfo.InvariantCulture);
+        if (underlying.IsPrimitive || underlying == typeof(decimal))
+            return Convert.ChangeType(text, underlying, CultureInfo.InvariantCulture);
+
+        return JsonSerializer.Deserialize(text, type);
     }
 }
