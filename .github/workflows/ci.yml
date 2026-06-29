@@ -6,12 +6,15 @@ on:
   pull_request:
     branches: ["**"]
 
+env:
+  PROJECT: NoobNotFound.Sheets/NoobNotFound.Sheets.csproj
+
 jobs:
   # ─────────────────────────────────────────────
   # Job 1 – Build (runs on every push / PR)
   # ─────────────────────────────────────────────
   build:
-    name: Build & Test
+    name: Build
     runs-on: ubuntu-latest
 
     steps:
@@ -21,17 +24,13 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x   # ← change to match your TFM if needed
+          dotnet-version: 10.0.x   # ← change to match your <TargetFramework> if needed
 
-      - name: Restore dependencies
-        run: dotnet restore
+      - name: Restore
+        run: dotnet restore ${{ env.PROJECT }}
 
       - name: Build
-        run: dotnet build --no-restore --configuration Release
-
-      # Uncomment if you add tests later:
-      # - name: Test
-      #   run: dotnet test --no-build --configuration Release
+        run: dotnet build ${{ env.PROJECT }} --no-restore --configuration Release
 
   # ─────────────────────────────────────────────
   # Job 2 – Pack & Publish (only on [publish])
@@ -39,16 +38,14 @@ jobs:
   publish:
     name: Pack & Publish to NuGet
     runs-on: ubuntu-latest
-    needs: build                    # only runs after a clean build
+    needs: build
 
-    # Gate: commit message OR description must contain [publish]
-    # github.event.head_commit.message contains both subject + body
     if: |
       github.event_name == 'push' &&
       contains(github.event.head_commit.message, '[publish]')
 
     permissions:
-      id-token: write               # required for NuGet Trusted Publishing (OIDC)
+      id-token: write   # required for NuGet Trusted Publishing (OIDC)
       contents: read
 
     steps:
@@ -60,20 +57,16 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Restore dependencies
-        run: dotnet restore
+      - name: Restore
+        run: dotnet restore ${{ env.PROJECT }}
 
       - name: Pack
-        run: dotnet pack --no-restore --configuration Release --output ./nupkg
+        run: dotnet pack ${{ env.PROJECT }} --no-restore --configuration Release --output ./nupkg
 
-      # Exchange GitHub OIDC token for a short-lived NuGet API key.
-      # No stored secrets needed — configure a Trusted Publishing policy
-      # on nuget.org first (see README for instructions).
       - name: NuGet login (Trusted Publishing)
         uses: NuGet/login@v1
         id: nuget_login
         with:
-          # Store your nuget.org profile name (NOT your email) as a secret.
           user: ${{ secrets.NUGET_USER }}
 
       - name: Push to NuGet.org
